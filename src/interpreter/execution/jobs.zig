@@ -1,0 +1,179 @@
+//! Job control: signal handlers, terminal control, and job continuation
+//!
+//! This module handles interactive job control features:
+//! - Signal handler setup (SIGCHLD, SIGTSTP, etc.)
+//! - Terminal foreground/background control
+//! - Continuing stopped jobs (fg/bg)
+
+const std = @import("std");
+const state_mod = @import("../../runtime/state.zig");
+const State = state_mod.State;
+const io = @import("../../terminal/io.zig");
+
+// POSIX functions not in Zig stdlib
+pub const c = struct {
+    pub extern "c" fn getpgrp() std.posix.pid_t;
+    pub extern "c" fn setpgid(pid: std.posix.pid_t, pgid: std.posix.pid_t) c_int;
+    pub extern "c" fn tcgetpgrp(fd: std.posix.fd_t) std.posix.pid_t;
+    pub extern "c" fn tcsetpgrp(fd: std.posix.fd_t, pgrp: std.posix.pid_t) c_int;
+    pub extern "c" fn getpid() std.posix.pid_t;
+    pub extern "c" fn kill(pid: std.posix.pid_t, sig: c_int) c_int;
+    pub extern "c" fn waitpid(pid: std.posix.pid_t, status: ?*u32, options: c_int) std.posix.pid_t;
+
+    // Wait flags
+    pub const WNOHANG: c_int = 1;
+    pub const WUNTRACED: c_int = 2;
+};
+
+/// Global state pointer for SIGCHLD signal handler.
+///
+/// RATIONALE: POSIX signal handlers have a C ABI constraint that prevents passing
+/// context through the handler signature. This global is the standard pattern for
+/// allowing the signal handler to update shell job state when child processes
+/// terminate or stop. Set once during `initJobControl()` and remains valid for
+/// the shell's lifetime.
+///
+/// SAFETY: Only accessed from signal handler context (single-threaded signal delivery)
+/// and from `initJobControl`. The shell is single-threaded, so no synchronization needed.
+var g_state: ?*State = null;
+
+/// Initialize job control for interactive shell
+pub fn initJobControl(state: *State) void {
+    g_state = state;
+
+    // Check if we're actually connected to a terminal
+    const is_tty = std.posix.isatty(state.terminal_fd);
+    if (!is_tty) {
+        state.interactive = false;
+    }
+
+    // Get our process group
+    state.shell_pgid = c.getpgrp();
+
+    // Make sure we're in the foreground (only if interactive)
+    if (state.interactive) {
+        // Loop until we're in the foreground
+        while (c.tcgetpgrp(state.terminal_fd) != state.shell_pgid) {
+            _ = c.kill(-state.shell_pgid, std.posix.SIG.TTIN);
+        }
+
+        // Put ourselves in our own process group
+        _ = c.setpgid(0, state.shell_pgid);
+
+        // Grab control of terminal
+        _ = c.tcsetpgrp(state.terminal_fd, state.shell_pgid);
+    }
+
+    // Set up signal handlers
+    initSignals();
+}
+
+/// Initialize signal handlers for job control
+pub fn initSignals() void {
+    // Ignore job control signals in the shell itself
+    const ignore_act = std.posix.Sigaction{
+        .handler = .{ .handler = std.posix.SIG.IGN },
+        .mask = std.posix.sigemptyset(),
+        .flags = 0,
+    };
+    std.posix.sigaction(std.posix.SIG.TSTP, &ignore_act, null);
+    std.posix.sigaction(std.posix.SIG.TTIN, &ignore_act, null);
+    std.posix.sigaction(std.posix.SIG.TTOU, &ignore_act, null);
+
+    // Set up SIGCHLD handler to reap children and update job status
+    const chld_act = std.posix.Sigaction{
+        .handler = .{ .handler = sigchldHandler },
+        .mask = std.posix.sigemptyset(),
+        .flags = std.posix.SA.RESTART | std.posix.SA.NOCLDSTOP,
+    };
+    std.posix.sigaction(std.posix.SIG.CHLD, &chld_act, null);
+}
+
+fn sigchldHandler(_: c_int) callconv(.c) void {
+    // Reap all terminated children (non-blocking)
+    while (true) {
+        var status: u32 = 0;
+        const pid = c.waitpid(-1, &status, c.WNOHANG | c.WUNTRACED);
+        if (pid <= 0) break;
+
+        // Update job status if we have state
+        if (g_state) |state| {
+            state.jobs.updateStatus(pid, status);
+        }
+    }
+}
+
+/// Wait for child, also detecting stop signals
+pub fn waitForChildWithStop(pid: std.posix.pid_t) u8 {
+    var status: u32 = 0;
+    _ = c.waitpid(pid, &status, c.WUNTRACED);
+
+    if (std.posix.W.IFEXITED(status)) {
+        return std.posix.W.EXITSTATUS(status);
+    } else if (std.posix.W.IFSIGNALED(status)) {
+        return 128 + @as(u8, @intCast(std.posix.W.TERMSIG(status)));
+    } else if (std.posix.W.IFSTOPPED(status)) {
+        // Process was stopped (Ctrl-Z)
+        return 128 + @as(u8, @intCast(std.posix.W.STOPSIG(status)));
+    }
+
+    return 1;
+}
+
+/// Continue a stopped job in foreground
+pub fn continueJobForeground(state: *State, job_id: u16) u8 {
+    const job = state.jobs.get(job_id) orelse {
+        io.printError("oshen: fg: no such job: %{d}\n", .{job_id});
+        return 1;
+    };
+
+    io.printStdout("{s}\n", .{job.cmd});
+    job.status = .running;
+
+    // Give terminal to job
+    if (state.interactive) {
+        _ = c.tcsetpgrp(state.terminal_fd, job.pgid);
+    }
+
+    // Send SIGCONT
+    _ = c.kill(-job.pgid, std.posix.SIG.CONT);
+
+    // Wait for job to complete or stop
+    var last_status: u8 = 0;
+    for (job.pids) |pid| {
+        last_status = waitForChildWithStop(pid);
+    }
+
+    // Take back terminal
+    if (state.interactive) {
+        _ = c.tcsetpgrp(state.terminal_fd, state.shell_pgid);
+    }
+
+    // Check if job stopped again
+    var status: u32 = 0;
+    const result = c.waitpid(job.pgid, &status, c.WNOHANG | c.WUNTRACED);
+    if (result > 0 and std.posix.W.IFSTOPPED(status)) {
+        job.status = .stopped;
+        io.printStdout("\n[{d}]+  Stopped                 {s}\n", .{ job.id, job.cmd });
+    } else {
+        state.jobs.remove(job_id);
+    }
+
+    return last_status;
+}
+
+/// Continue a stopped job in background
+pub fn continueJobBackground(state: *State, job_id: u16) u8 {
+    const job = state.jobs.get(job_id) orelse {
+        io.printError("oshen: bg: no such job: %{d}\n", .{job_id});
+        return 1;
+    };
+
+    io.printStdout("[{d}] {s} &\n", .{ job.id, job.cmd });
+    job.status = .running;
+
+    // Send SIGCONT
+    _ = c.kill(-job.pgid, std.posix.SIG.CONT);
+
+    return 0;
+}
