@@ -9,6 +9,6 @@ pub const builtin = builtins.Builtin{
 };
 
 fn run(state: *builtins.State, cmd: builtins.ExpandedCmd) u8 {
-    const job_id = state.jobs.parseJobArg(cmd.argv, "fg", false) orelse return 1;
+    const job_id = state.jobs.resolveJob(cmd.argv, "fg", false) orelse return 1;
     return exec.continueJobForeground(state, job_id);
 }

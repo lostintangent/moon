@@ -174,8 +174,8 @@ pub const JobTable = struct {
         }
     };
 
-    /// Parse a job ID from command arguments (handles %N format)
-    pub fn parseJobArg(self: *JobTable, argv: []const []const u8, comptime cmd_name: []const u8, stopped_only: bool) ?u16 {
+    /// Resolve a job ID from command arguments, or default to the most recent job
+    pub fn resolveJob(self: *JobTable, argv: []const []const u8, comptime cmd_name: []const u8, stopped_only: bool) ?u16 {
         if (argv.len < 2) {
             // No argument - use most recent (optionally stopped) job
             if (stopped_only) {
@@ -197,11 +197,8 @@ pub const JobTable = struct {
         }
 
         const arg = argv[1];
-
-        // Handle %N format
-        const num_str = if (arg.len > 0 and arg[0] == '%') arg[1..] else arg;
-        return std.fmt.parseInt(u16, num_str, 10) catch {
-            io.printError("oshen: " ++ cmd_name ++ ": {s}: no such job\n", .{arg});
+        return std.fmt.parseInt(u16, arg, 10) catch {
+            io.printError("oshen: " ++ cmd_name ++ ": {s}: invalid job ID\n", .{arg});
             return null;
         };
     }
