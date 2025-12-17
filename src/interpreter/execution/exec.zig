@@ -64,6 +64,19 @@ pub fn executeStatement(allocator: std.mem.Allocator, state: *State, stmt: Expan
             state.loop_continue = true;
             return 0;
         },
+        .return_stmt => |opt_status_str| {
+            state.fn_return = true;
+            if (opt_status_str) |status_str| {
+                // Parse the expanded string as u8 and set as status
+                const parsed = std.fmt.parseInt(u8, status_str, 10) catch blk: {
+                    io.printError("return: {s}: numeric argument required\n", .{status_str});
+                    break :blk 1;
+                };
+                state.setStatus(parsed);
+            }
+            // If no argument, status is already the last command's exit status
+            return state.status;
+        },
     };
 }
 
@@ -82,9 +95,14 @@ fn executeIfStatement(allocator: std.mem.Allocator, state: *State, if_stmt: expa
     for (if_stmt.branches) |branch| {
         const cond_status = executeBody(allocator, state, branch.condition, "if: condition error");
 
+        // Check for return during condition evaluation
+        if (state.fn_return) return state.status;
+
         // Exit status 0 means true (success) - execute this branch's body
         if (cond_status == 0) {
-            return executeBody(allocator, state, branch.body, "if: body error");
+            const body_status = executeBody(allocator, state, branch.body, "if: body error");
+            // fn_return propagates automatically since we return the status
+            return body_status;
         }
     }
 
@@ -153,6 +171,11 @@ fn executeForStatement(allocator: std.mem.Allocator, state: *State, for_stmt: ex
             return 1;
         };
 
+        // Check for return - propagate up without resetting
+        if (state.fn_return) {
+            return state.status;
+        }
+
         // Check for break
         if (state.loop_break) {
             state.loop_break = false;
@@ -198,6 +221,9 @@ fn executeWhileStatement(allocator: std.mem.Allocator, state: *State, while_stmt
             return 1;
         };
 
+        // Check for return during condition evaluation
+        if (state.fn_return) return state.status;
+
         // Exit status 0 means true (continue), non-zero means false (stop)
         if (cond_status != 0) break;
 
@@ -206,6 +232,11 @@ fn executeWhileStatement(allocator: std.mem.Allocator, state: *State, while_stmt
             io.printError("while: body error: {}\n", .{err});
             return 1;
         };
+
+        // Check for return - propagate up without resetting
+        if (state.fn_return) {
+            return state.status;
+        }
 
         // Check for break
         if (state.loop_break) {
@@ -389,8 +420,14 @@ fn tryRunFunction(allocator: std.mem.Allocator, state: *State, cmd: ExpandedCmd)
         } else {
             state.unsetVar("argv");
         }
+        state.fn_return = false;
         return 1;
     };
+
+    // Handle return statement - status is already set, just reset the flag
+    if (state.fn_return) {
+        state.fn_return = false;
+    }
 
     // Restore $argv
     if (old_argv) |v| {

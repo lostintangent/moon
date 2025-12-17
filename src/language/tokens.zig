@@ -108,7 +108,7 @@ pub const operators = [_][]const u8{
     "=>@", "2>&1", "2>>", "&>", "|>", "&&", "||", "=>", "2>", ">>", "|", "&", "<", ">",
 };
 
-pub const keywords = [_][]const u8{ "and", "or", "fun", "end", "if", "else", "for", "in", "while", "break", "continue" };
+pub const keywords = [_][]const u8{ "and", "or", "fun", "end", "if", "else", "for", "in", "while", "break", "continue", "return" };
 
 /// Check if a word is a keyword
 pub fn isKeyword(word: []const u8) bool {

@@ -126,6 +126,11 @@ pub fn executeAst(allocator: std.mem.Allocator, state: *State, parsed: ParsedInp
         if (state.loop_break or state.loop_continue) {
             return last_status;
         }
+
+        // Return signals bubble up to the enclosing function
+        if (state.fn_return) {
+            return state.status;
+        }
     }
 
     return last_status;

@@ -102,6 +102,8 @@ pub const StatementKind = union(enum) {
     break_stmt: void,
     /// Continue to next iteration
     continue_stmt: void,
+    /// Return from function with optional status (word parts to be expanded)
+    return_stmt: ?[]const WordPart,
 };
 
 /// Command statement: a pipeline chain with optional capture and background execution
@@ -118,7 +120,7 @@ pub const Statement = struct {
     pub fn isBg(self: Statement) bool {
         return switch (self.kind) {
             .cmd => |cmd| cmd.bg,
-            .fun_def, .if_stmt, .for_stmt, .while_stmt, .break_stmt, .continue_stmt => false,
+            else => false,
         };
     }
 };

@@ -116,7 +116,7 @@ Highlighting updates in real-time as you edit, giving instant feedback on syntax
 
 As you type, Oshen shows suggestions from your command history in dimmed text:
 
-```
+```shell
 $ git com                           # You type this
 $ git commit -m "Update docs"       # Suggestion appears dimmed
 ```
@@ -137,7 +137,7 @@ At the start of a line, Tab completes from:
 - All builtin commands (`cd`, `set`, `export`, etc.)
 - Executables found in your `$PATH`
 
-```
+```shell
 $ ec<Tab>        →  $ echo
 $ gi<Tab>        →  $ git
 ```
@@ -146,7 +146,7 @@ $ gi<Tab>        →  $ git
 
 In argument positions (or when the word contains `/`, `.`, or `~`), Tab completes file and directory paths:
 
-```
+```shell
 $ cat ~/Doc<Tab>      →  $ cat ~/Documents/
 $ ls src/*.z<Tab>     →  $ ls src/main.zig
 ```
@@ -190,7 +190,7 @@ Command history is automatically saved to `~/.oshen_log` and persists across ses
 
 Press **Ctrl+R** to search your command history as you type:
 
-```
+```shell
 (reverse-i-search)`git': git commit -m "Update docs"
 ```
 
@@ -612,7 +612,16 @@ greet Alice                  # Hello, Alice!
 fun hi echo "Hi there" end
 ```
 
-Functions receive arguments in `$argv`.
+Functions receive arguments in `$argv`. Use `return` to exit early with a status code (or omit the argument to use the last command's status):
+
+```sh
+fun check_file
+    if test ! -f $1
+        return 1
+    end
+    cat $1
+end
+```
 
 ---
 

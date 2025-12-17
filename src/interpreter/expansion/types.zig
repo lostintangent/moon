@@ -109,6 +109,7 @@ pub const ExpandedStmtKind = union(enum) {
     while_stmt: ast.WhileStmt,
     break_stmt: void,
     continue_stmt: void,
+    return_stmt: ?[]const u8, // Expanded string value (parsed to u8 at execution)
 };
 
 pub const ExpandedStmt = struct {

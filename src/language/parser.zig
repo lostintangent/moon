@@ -347,6 +347,22 @@ pub const Parser = struct {
             return Statement{ .kind = .continue_stmt };
         }
 
+        // Check for return statement: return [value]
+        if (self.isOp("return")) {
+            _ = self.advance();
+            // Check for optional status argument (can be variable, literal, etc.)
+            var status_parts: ?[]const WordPart = null;
+            if (self.isWord()) {
+                if (self.peek()) |tok| {
+                    if (tok.parts()) |segs| {
+                        status_parts = segs;
+                        _ = self.advance();
+                    }
+                }
+            }
+            return Statement{ .kind = .{ .return_stmt = status_parts } };
+        }
+
         const chains = try self.parseLogical() orelse return null;
 
         var bg = false;
@@ -1135,4 +1151,76 @@ test "continue statement" {
 
     try testing.expectEqual(@as(usize, 1), prog.statements.len);
     try testing.expect(prog.statements[0].kind == .continue_stmt);
+}
+
+test "return statement without argument" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const input = "return";
+    var lex = lexer.Lexer.init(allocator, input);
+    const tokens = try lex.tokenize();
+
+    var p = Parser.initWithInput(allocator, tokens, input);
+    const prog = try p.parse();
+
+    try testing.expectEqual(@as(usize, 1), prog.statements.len);
+    try testing.expect(prog.statements[0].kind == .return_stmt);
+    try testing.expectEqual(@as(?[]const WordPart, null), prog.statements[0].kind.return_stmt);
+}
+
+test "return statement with status" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const input = "return 1";
+    var lex = lexer.Lexer.init(allocator, input);
+    const tokens = try lex.tokenize();
+
+    var p = Parser.initWithInput(allocator, tokens, input);
+    const prog = try p.parse();
+
+    try testing.expectEqual(@as(usize, 1), prog.statements.len);
+    try testing.expect(prog.statements[0].kind == .return_stmt);
+    const parts = prog.statements[0].kind.return_stmt.?;
+    try testing.expectEqual(@as(usize, 1), parts.len);
+    try testing.expectEqualStrings("1", parts[0].t);
+}
+
+test "return statement with zero" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const input = "return 0";
+    var lex = lexer.Lexer.init(allocator, input);
+    const tokens = try lex.tokenize();
+
+    var p = Parser.initWithInput(allocator, tokens, input);
+    const prog = try p.parse();
+
+    try testing.expectEqual(@as(usize, 1), prog.statements.len);
+    try testing.expect(prog.statements[0].kind == .return_stmt);
+    const parts = prog.statements[0].kind.return_stmt.?;
+    try testing.expectEqual(@as(usize, 1), parts.len);
+    try testing.expectEqualStrings("0", parts[0].t);
+}
+
+test "return statement with variable" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const input = "return $status";
+    var lex = lexer.Lexer.init(allocator, input);
+    const tokens = try lex.tokenize();
+
+    var p = Parser.initWithInput(allocator, tokens, input);
+    const prog = try p.parse();
+
+    try testing.expectEqual(@as(usize, 1), prog.statements.len);
+    try testing.expect(prog.statements[0].kind == .return_stmt);
+    try testing.expect(prog.statements[0].kind.return_stmt != null);
 }

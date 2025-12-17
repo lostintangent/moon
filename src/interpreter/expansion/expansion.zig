@@ -86,6 +86,17 @@ pub fn expandStmt(allocator: std.mem.Allocator, ctx: *expand.ExpandContext, stmt
         .continue_stmt => ExpandedStmt{
             .kind = .continue_stmt,
         },
+        .return_stmt => |status_parts| blk: {
+            // Expand the status argument if present
+            if (status_parts) |parts| {
+                const expanded = try expand.expandWord(ctx, parts);
+                // Take the first expanded word as the status string
+                if (expanded.len > 0) {
+                    break :blk ExpandedStmt{ .kind = .{ .return_stmt = expanded[0] } };
+                }
+            }
+            break :blk ExpandedStmt{ .kind = .{ .return_stmt = null } };
+        },
     };
 }
 

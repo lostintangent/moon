@@ -54,6 +54,9 @@ pub const State = struct {
     /// Flag to signal loop should continue to next iteration
     loop_continue: bool = false,
 
+    /// Flag to signal function should return
+    fn_return: bool = false,
+
     /// Free a variable entry (key and all values in the list)
     fn freeVarEntry(self: *State, entry: std.StringHashMap([]const []const u8).KV) void {
         self.allocator.free(entry.key);

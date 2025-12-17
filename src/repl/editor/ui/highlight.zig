@@ -88,6 +88,7 @@ pub fn render(allocator: std.mem.Allocator, input: []const u8, writer: anytype, 
                 .while_stmt => {}, // While statements don't need command highlighting
                 .break_stmt => {}, // Break doesn't need command highlighting
                 .continue_stmt => {}, // Continue doesn't need command highlighting
+                .return_stmt => {}, // Return doesn't need command highlighting
             }
         }
     }

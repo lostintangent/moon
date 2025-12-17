@@ -58,6 +58,7 @@ The language subsystem converts source text into a structured AST. It knows noth
 - Conditionals (`&&`, `||`, `and`, `or`)
 - Control flow (`if`/`else if`/`else`/`for`/`while`/`fun` blocks with `end`)
 - Loop control (`break`, `continue`)
+- Function control (`return [status]`)
 - Redirections (`>`, `>>`, `2>`, `&>`, `2>&1`)
 - Command substitution (`$(...)`)
 - Output capture (`=>`, `=>@`)
@@ -514,22 +515,25 @@ ExpandedStmt {
 
 Bodies are re-parsed and executed via `interpreter.execute()`. This creates a natural recursion boundary and keeps the expander simple.
 
-### 6. Loop Control via State Flags
+### 6. Loop Control and Return via State Flags
 
-`break` and `continue` use state flags to communicate with loop executors:
+`break`, `continue`, and `return` use state flags to communicate with loop/function executors:
 
 ```zig
 // In state.zig
 loop_break: bool = false,
 loop_continue: bool = false,
+fn_return: bool = false,
 
 // In execution:
 // 1. break_stmt sets state.loop_break = true
 // 2. Loop executor checks flag after each iteration/statement
 // 3. Flag is reset at end of loop iteration (continue) or loop exit (break)
+// 4. return_stmt sets state.fn_return = true and state.status
+// 5. Function executor checks fn_return and resets it after function completes
 ```
 
-This propagation model allows break/continue to work correctly even when nested inside `if` statements within a loop body.
+This propagation model allows break/continue/return to work correctly even when nested inside `if` statements within a loop or function body.
 
 ### 7. Two-Layer Parsing
 
