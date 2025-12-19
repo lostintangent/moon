@@ -3,6 +3,7 @@
 //! Tokenizes and parses input to provide semantic highlighting:
 //! - Valid commands (builtins, aliases, or PATH executables) are bold
 //! - Invalid commands are red
+//! - Keywords are blue
 //! - Strings are green, operators are cyan/yellow/magenta
 
 const std = @import("std");
@@ -21,10 +22,6 @@ const CommandCache = struct {
 
     fn init(allocator: std.mem.Allocator, state: ?*State) CommandCache {
         return .{ .map = std.StringHashMap(bool).init(allocator), .allocator = allocator, .state = state };
-    }
-
-    fn deinit(self: *CommandCache) void {
-        self.map.deinit();
     }
 
     fn isValid(self: *CommandCache, cmd: []const u8) bool {
@@ -64,31 +61,26 @@ pub fn render(allocator: std.mem.Allocator, input: []const u8, writer: anytype, 
 
     if (ast) |program| {
         for (program.statements) |stmt| {
-            switch (stmt.kind) {
-                .cmd => |cmd_stmt| {
-                    for (cmd_stmt.chains) |chain| {
-                        for (chain.pipeline.cmds) |cmd| {
-                            if (cmd.words.len == 0) continue;
-                            const first_word = cmd.words[0];
-                            if (first_word.len == 0) continue;
+            // Only command statements need command-position highlighting
+            const cmd_stmt = switch (stmt.kind) {
+                .command => |cmd| cmd,
+                else => continue,
+            };
 
-                            // Find the token whose word slice matches (by pointer identity)
-                            for (toks) |tok| {
-                                if (tok.data == .word and tok.data.word.ptr == first_word.ptr) {
-                                    cmd_positions.put(tok.span.start_col - 1, true) catch {};
-                                    break;
-                                }
-                            }
+            for (cmd_stmt.chains) |chain| {
+                for (chain.pipeline.commands) |cmd| {
+                    if (cmd.words.len == 0) continue;
+                    const first_word = cmd.words[0];
+                    if (first_word.len == 0) continue;
+
+                    // Find the token whose word slice matches (by pointer identity)
+                    for (toks) |tok| {
+                        if (tok.kind == .word and tok.kind.word.ptr == first_word.ptr) {
+                            cmd_positions.put(tok.span.start_col - 1, true) catch {};
+                            break;
                         }
                     }
-                },
-                .fun_def => {}, // Function definitions don't need command highlighting
-                .if_stmt => {}, // If statements don't need command highlighting
-                .for_stmt => {}, // For statements don't need command highlighting
-                .while_stmt => {}, // While statements don't need command highlighting
-                .break_stmt => {}, // Break doesn't need command highlighting
-                .continue_stmt => {}, // Continue doesn't need command highlighting
-                .return_stmt => {}, // Return doesn't need command highlighting
+                }
             }
         }
     }
@@ -114,13 +106,13 @@ pub fn render(allocator: std.mem.Allocator, input: []const u8, writer: anytype, 
 
         const text = input[start..end];
 
-        switch (token.data) {
+        switch (token.kind) {
             .word => |segs| {
                 // Get the bare text for lookups
-                const bare_text = if (segs.len > 0 and segs[0].q == .bare) segs[0].t else text;
+                const bare_text = if (segs.len > 0 and segs[0].quotes == .none) segs[0].text else text;
 
                 // Check if this is a keyword first
-                if (segs.len == 1 and segs[0].q == .bare and tokens.isKeyword(bare_text)) {
+                if (segs.len == 1 and segs[0].quotes == .none and tokens.isKeyword(bare_text)) {
                     try writer.writeAll(ansi.blue);
                     try writer.writeAll(text);
                     try writer.writeAll(ansi.reset);
@@ -138,7 +130,7 @@ pub fn render(allocator: std.mem.Allocator, input: []const u8, writer: anytype, 
                 } else {
                     // Color quoted strings green, bare words default
                     const has_quotes = for (segs) |seg| {
-                        if (seg.q != .bare) break true;
+                        if (seg.quotes != .none) break true;
                     } else false;
 
                     if (has_quotes) {
@@ -150,12 +142,12 @@ pub fn render(allocator: std.mem.Allocator, input: []const u8, writer: anytype, 
                     }
                 }
             },
-            .op => |op| {
+            .operator => |op| {
                 try writer.writeAll(colorForOp(op));
                 try writer.writeAll(text);
                 try writer.writeAll(ansi.reset);
             },
-            .sep => {
+            .separator => {
                 try writer.writeAll(ansi.yellow);
                 try writer.writeAll(text);
                 try writer.writeAll(ansi.reset);
@@ -229,4 +221,11 @@ test "string gets colored green" {
     defer buf.deinit();
     try render(std.testing.allocator, "echo \"hello\"", buf.writer(), null);
     try std.testing.expect(std.mem.indexOf(u8, buf.items, ansi.green) != null);
+}
+
+test "keyword gets colored blue" {
+    var buf = std.ArrayList(u8).init(std.testing.allocator);
+    defer buf.deinit();
+    try render(std.testing.allocator, "if true", buf.writer(), null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, ansi.blue) != null);
 }

@@ -1,14 +1,14 @@
 //! Expanded types - the fully resolved representation ready for execution
 //!
 //! The expander transforms AST nodes into expanded types. Types that pass through
-//! unchanged reference ast.zig directly (FunDef, IfStmt, ForStmt, WhileStmt).
+//! unchanged reference ast.zig directly (FunctionDefinition, IfStatement, ForStatement, WhileStatement).
 //! New types are defined only where expansion does actual work:
 //!
 //! UNCHANGED (ast types used directly in ExpandedStmtKind union):
-//!   - ast.FunDef - body stored as string, re-parsed at runtime
-//!   - ast.IfStmt - condition/body stored as strings
-//!   - ast.ForStmt - items expanded at runtime, not expansion time
-//!   - ast.WhileStmt - condition re-evaluated each iteration
+//!   - ast.FunctionDefinition - body stored as string, re-parsed at runtime
+//!   - ast.IfStatement - condition/body stored as strings
+//!   - ast.ForStatement - items expanded at runtime, not expansion time
+//!   - ast.WhileStatement - condition re-evaluated each iteration
 //!
 //! TRANSFORMED (new types defined below):
 //!   - ExpandedRedir - parses ">" into structured {fd, kind, path}
@@ -63,7 +63,7 @@ pub const ExpandedRedir = struct {
 };
 
 /// Environment variable for command - value is expanded
-/// AST has: Assign { key, value: []WordPart }
+/// AST has: Assignment { key, value: []WordPart }
 /// Plan has: EnvKV { key, value: "expanded string" }
 pub const EnvKV = struct {
     key: []const u8,
@@ -76,23 +76,22 @@ pub const EnvKV = struct {
 pub const ExpandedCmd = struct {
     argv: []const []const u8,
     env: []const EnvKV,
-    redirs: []const ExpandedRedir,
+    redirects: []const ExpandedRedir,
 };
 
 /// Pipeline - list of expanded commands
 pub const ExpandedPipeline = struct {
-    cmds: []const ExpandedCmd,
+    commands: []const ExpandedCmd,
 };
 
-/// Chain - normalizes operators (&& → "and", || → "or")
 pub const ExpandedChain = struct {
-    op: ?[]const u8,
+    op: ast.ChainOperator,
     pipeline: ExpandedPipeline,
 };
 
 /// Command statement
 pub const ExpandedCmdStmt = struct {
-    bg: bool,
+    background: bool,
     capture: ?Capture,
     chains: []const ExpandedChain,
 };
@@ -102,14 +101,14 @@ pub const ExpandedCmdStmt = struct {
 // =============================================================================
 
 pub const ExpandedStmtKind = union(enum) {
-    cmd: ExpandedCmdStmt,
-    fun_def: ast.FunDef,
-    if_stmt: ast.IfStmt,
-    for_stmt: ast.ForStmt,
-    while_stmt: ast.WhileStmt,
-    break_stmt: void,
-    continue_stmt: void,
-    return_stmt: ?[]const u8, // Expanded string value (parsed to u8 at execution)
+    command: ExpandedCmdStmt,
+    function: ast.FunctionDefinition,
+    @"if": ast.IfStatement,
+    @"for": ast.ForStatement,
+    @"while": ast.WhileStatement,
+    @"break": void,
+    @"continue": void,
+    @"return": ?[]const u8, // Expanded string value (parsed to u8 at execution)
 };
 
 pub const ExpandedStmt = struct {

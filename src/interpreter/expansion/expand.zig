@@ -138,10 +138,10 @@ pub fn expandWord(ctx: *ExpandContext, segs: []const WordPart) (ExpandError || s
 }
 
 fn expandSegment(ctx: *ExpandContext, seg: WordPart) (ExpandError || std.mem.Allocator.Error)![]const []const u8 {
-    switch (seg.q) {
-        .sq => return singletonSlice(ctx.allocator, seg.t),
-        .dq => return expandText(ctx, seg.t, .{ .expand_glob = false }),
-        .bare => return expandText(ctx, seg.t, .{ .expand_glob = true }),
+    switch (seg.quotes) {
+        .single => return singletonSlice(ctx.allocator, seg.text),
+        .double => return expandText(ctx, seg.text, .{ .expand_glob = false }),
+        .none => return expandText(ctx, seg.text, .{ .expand_glob = true }),
     }
 }
 
@@ -497,7 +497,7 @@ test "simple bare word" {
     var ctx = ExpandContext.init(arena.allocator(), &state);
     defer ctx.deinit();
 
-    const segs = [_]WordPart{.{ .q = .bare, .t = "hello" }};
+    const segs = [_]WordPart{.{ .quotes = .none, .text = "hello" }};
     const result = try expandWord(&ctx, &segs);
 
     try testing.expectEqual(@as(usize, 1), result.len);
@@ -515,7 +515,7 @@ test "variable expansion" {
     const values = [_][]const u8{ "a", "b" };
     try ctx.setVar("xs", &values);
 
-    const segs = [_]WordPart{.{ .q = .bare, .t = "$xs" }};
+    const segs = [_]WordPart{.{ .quotes = .none, .text = "$xs" }};
     const result = try expandWord(&ctx, &segs);
 
     try testing.expectEqual(@as(usize, 2), result.len);
@@ -533,7 +533,7 @@ test "tilde expansion" {
 
     state.home = "/home/user";
 
-    const segs = [_]WordPart{.{ .q = .bare, .t = "~/src" }};
+    const segs = [_]WordPart{.{ .quotes = .none, .text = "~/src" }};
     const result = try expandWord(&ctx, &segs);
 
     try testing.expectEqual(@as(usize, 1), result.len);
@@ -551,7 +551,7 @@ test "single quotes preserve literal" {
     const values = [_][]const u8{ "a", "b" };
     try ctx.setVar("xs", &values);
 
-    const segs = [_]WordPart{.{ .q = .sq, .t = "$xs" }};
+    const segs = [_]WordPart{.{ .quotes = .single, .text = "$xs" }};
     const result = try expandWord(&ctx, &segs);
 
     try testing.expectEqual(@as(usize, 1), result.len);
@@ -566,7 +566,7 @@ test "double quoted escaped dollar is literal" {
     var ctx = ExpandContext.init(arena.allocator(), &state);
     defer ctx.deinit();
 
-    const segs = [_]WordPart{.{ .q = .dq, .t = "\\$HOME" }};
+    const segs = [_]WordPart{.{ .quotes = .double, .text = "\\$HOME" }};
     const result = try expandWord(&ctx, &segs);
 
     try testing.expectEqual(@as(usize, 1), result.len);
@@ -581,7 +581,7 @@ test "bare escaped dollar is literal" {
     var ctx = ExpandContext.init(arena.allocator(), &state);
     defer ctx.deinit();
 
-    const segs = [_]WordPart{.{ .q = .bare, .t = "\\$HOME" }};
+    const segs = [_]WordPart{.{ .quotes = .none, .text = "\\$HOME" }};
     const result = try expandWord(&ctx, &segs);
 
     try testing.expectEqual(@as(usize, 1), result.len);
@@ -599,7 +599,7 @@ test "cartesian product prefix" {
     const values = [_][]const u8{ "a", "b" };
     try ctx.setVar("xs", &values);
 
-    const segs = [_]WordPart{ .{ .q = .bare, .t = "pre" }, .{ .q = .bare, .t = "$xs" } };
+    const segs = [_]WordPart{ .{ .quotes = .none, .text = "pre" }, .{ .quotes = .none, .text = "$xs" } };
     const result = try expandWord(&ctx, &segs);
 
     try testing.expectEqual(@as(usize, 2), result.len);
@@ -620,7 +620,7 @@ test "cartesian two lists" {
     try ctx.setVar("xs", &xs_values);
     try ctx.setVar("ys", &ys_values);
 
-    const segs = [_]WordPart{.{ .q = .bare, .t = "$xs$ys" }};
+    const segs = [_]WordPart{.{ .quotes = .none, .text = "$xs$ys" }};
     const result = try expandWord(&ctx, &segs);
 
     // a*{1,2} + b*{1,2} = a1, a2, b1, b2
@@ -641,7 +641,7 @@ test "command substitution mock" {
 
     try ctx.setMockCmdsub("whoami", "jon");
 
-    const segs = [_]WordPart{.{ .q = .bare, .t = "$(whoami)" }};
+    const segs = [_]WordPart{.{ .quotes = .none, .text = "$(whoami)" }};
     const result = try expandWord(&ctx, &segs);
 
     try testing.expectEqual(@as(usize, 1), result.len);
@@ -659,7 +659,7 @@ test "glob mock" {
     const matches = [_][]const u8{ "src/main.zig", "src/util.zig" };
     try ctx.setMockGlob("src/*.zig", &matches);
 
-    const segs = [_]WordPart{.{ .q = .bare, .t = "src/*.zig" }};
+    const segs = [_]WordPart{.{ .quotes = .none, .text = "src/*.zig" }};
     const result = try expandWord(&ctx, &segs);
 
     try testing.expectEqual(@as(usize, 2), result.len);
@@ -678,7 +678,7 @@ test "positional parameter $1" {
     const argv = [_][]const u8{ "foo", "bar", "baz" };
     try ctx.setVar("argv", &argv);
 
-    const segs = [_]WordPart{.{ .q = .bare, .t = "$1" }};
+    const segs = [_]WordPart{.{ .quotes = .none, .text = "$1" }};
     const result = try expandWord(&ctx, &segs);
 
     try testing.expectEqual(@as(usize, 1), result.len);
@@ -696,7 +696,7 @@ test "positional parameter $2" {
     const argv = [_][]const u8{ "foo", "bar", "baz" };
     try ctx.setVar("argv", &argv);
 
-    const segs = [_]WordPart{.{ .q = .bare, .t = "$2" }};
+    const segs = [_]WordPart{.{ .quotes = .none, .text = "$2" }};
     const result = try expandWord(&ctx, &segs);
 
     try testing.expectEqual(@as(usize, 1), result.len);
@@ -714,7 +714,7 @@ test "positional parameter $# count" {
     const argv = [_][]const u8{ "foo", "bar", "baz" };
     try ctx.setVar("argv", &argv);
 
-    const segs = [_]WordPart{.{ .q = .bare, .t = "$#" }};
+    const segs = [_]WordPart{.{ .quotes = .none, .text = "$#" }};
     const result = try expandWord(&ctx, &segs);
 
     try testing.expectEqual(@as(usize, 1), result.len);
@@ -732,7 +732,7 @@ test "positional parameter $* all args" {
     const argv = [_][]const u8{ "foo", "bar" };
     try ctx.setVar("argv", &argv);
 
-    const segs = [_]WordPart{.{ .q = .bare, .t = "$*" }};
+    const segs = [_]WordPart{.{ .quotes = .none, .text = "$*" }};
     const result = try expandWord(&ctx, &segs);
 
     try testing.expectEqual(@as(usize, 2), result.len);
@@ -751,7 +751,7 @@ test "positional parameter out of range" {
     const argv = [_][]const u8{"foo"};
     try ctx.setVar("argv", &argv);
 
-    const segs = [_]WordPart{.{ .q = .bare, .t = "$5" }};
+    const segs = [_]WordPart{.{ .quotes = .none, .text = "$5" }};
     const result = try expandWord(&ctx, &segs);
 
     try testing.expectEqual(@as(usize, 1), result.len);
@@ -773,7 +773,7 @@ test "array index: single positive index [1]" {
     const values = [_][]const u8{ "a", "b", "c" };
     try ctx.setVar("xs", &values);
 
-    const segs = [_]WordPart{.{ .q = .bare, .t = "$xs[1]" }};
+    const segs = [_]WordPart{.{ .quotes = .none, .text = "$xs[1]" }};
     const result = try expandWord(&ctx, &segs);
 
     try testing.expectEqual(@as(usize, 1), result.len);
@@ -791,7 +791,7 @@ test "array index: single positive index [2]" {
     const values = [_][]const u8{ "a", "b", "c" };
     try ctx.setVar("xs", &values);
 
-    const segs = [_]WordPart{.{ .q = .bare, .t = "$xs[2]" }};
+    const segs = [_]WordPart{.{ .quotes = .none, .text = "$xs[2]" }};
     const result = try expandWord(&ctx, &segs);
 
     try testing.expectEqual(@as(usize, 1), result.len);
@@ -809,7 +809,7 @@ test "array index: negative index [-1] = last" {
     const values = [_][]const u8{ "a", "b", "c" };
     try ctx.setVar("xs", &values);
 
-    const segs = [_]WordPart{.{ .q = .bare, .t = "$xs[-1]" }};
+    const segs = [_]WordPart{.{ .quotes = .none, .text = "$xs[-1]" }};
     const result = try expandWord(&ctx, &segs);
 
     try testing.expectEqual(@as(usize, 1), result.len);
@@ -827,7 +827,7 @@ test "array index: negative index [-2] = second-to-last" {
     const values = [_][]const u8{ "a", "b", "c" };
     try ctx.setVar("xs", &values);
 
-    const segs = [_]WordPart{.{ .q = .bare, .t = "$xs[-2]" }};
+    const segs = [_]WordPart{.{ .quotes = .none, .text = "$xs[-2]" }};
     const result = try expandWord(&ctx, &segs);
 
     try testing.expectEqual(@as(usize, 1), result.len);
@@ -845,7 +845,7 @@ test "array index: out of bounds returns empty" {
     const values = [_][]const u8{ "a", "b", "c" };
     try ctx.setVar("xs", &values);
 
-    const segs = [_]WordPart{.{ .q = .bare, .t = "$xs[10]" }};
+    const segs = [_]WordPart{.{ .quotes = .none, .text = "$xs[10]" }};
     const result = try expandWord(&ctx, &segs);
 
     try testing.expectEqual(@as(usize, 1), result.len);
@@ -863,7 +863,7 @@ test "array index: range [1..2]" {
     const values = [_][]const u8{ "a", "b", "c", "d" };
     try ctx.setVar("xs", &values);
 
-    const segs = [_]WordPart{.{ .q = .bare, .t = "$xs[1..2]" }};
+    const segs = [_]WordPart{.{ .quotes = .none, .text = "$xs[1..2]" }};
     const result = try expandWord(&ctx, &segs);
 
     try testing.expectEqual(@as(usize, 2), result.len);
@@ -882,7 +882,7 @@ test "array index: range [2..4]" {
     const values = [_][]const u8{ "a", "b", "c", "d", "e" };
     try ctx.setVar("xs", &values);
 
-    const segs = [_]WordPart{.{ .q = .bare, .t = "$xs[2..4]" }};
+    const segs = [_]WordPart{.{ .quotes = .none, .text = "$xs[2..4]" }};
     const result = try expandWord(&ctx, &segs);
 
     try testing.expectEqual(@as(usize, 3), result.len);
@@ -902,7 +902,7 @@ test "array index: range [2..] from index to end" {
     const values = [_][]const u8{ "a", "b", "c", "d" };
     try ctx.setVar("xs", &values);
 
-    const segs = [_]WordPart{.{ .q = .bare, .t = "$xs[2..]" }};
+    const segs = [_]WordPart{.{ .quotes = .none, .text = "$xs[2..]" }};
     const result = try expandWord(&ctx, &segs);
 
     try testing.expectEqual(@as(usize, 3), result.len);
@@ -922,7 +922,7 @@ test "array index: range [..2] from start to index" {
     const values = [_][]const u8{ "a", "b", "c", "d" };
     try ctx.setVar("xs", &values);
 
-    const segs = [_]WordPart{.{ .q = .bare, .t = "$xs[..2]" }};
+    const segs = [_]WordPart{.{ .quotes = .none, .text = "$xs[..2]" }};
     const result = try expandWord(&ctx, &segs);
 
     try testing.expectEqual(@as(usize, 2), result.len);
@@ -941,7 +941,7 @@ test "array index: negative range [-2..-1]" {
     const values = [_][]const u8{ "a", "b", "c", "d" };
     try ctx.setVar("xs", &values);
 
-    const segs = [_]WordPart{.{ .q = .bare, .t = "$xs[-2..-1]" }};
+    const segs = [_]WordPart{.{ .quotes = .none, .text = "$xs[-2..-1]" }};
     const result = try expandWord(&ctx, &segs);
 
     try testing.expectEqual(@as(usize, 2), result.len);
@@ -960,7 +960,7 @@ test "array index: with braced variable ${xs}[1]" {
     const values = [_][]const u8{ "a", "b", "c" };
     try ctx.setVar("xs", &values);
 
-    const segs = [_]WordPart{.{ .q = .bare, .t = "${xs}[2]" }};
+    const segs = [_]WordPart{.{ .quotes = .none, .text = "${xs}[2]" }};
     const result = try expandWord(&ctx, &segs);
 
     try testing.expectEqual(@as(usize, 1), result.len);
@@ -978,7 +978,7 @@ test "array index: argv[1]" {
     const argv = [_][]const u8{ "foo", "bar", "baz" };
     try ctx.setVar("argv", &argv);
 
-    const segs = [_]WordPart{.{ .q = .bare, .t = "$argv[1]" }};
+    const segs = [_]WordPart{.{ .quotes = .none, .text = "$argv[1]" }};
     const result = try expandWord(&ctx, &segs);
 
     try testing.expectEqual(@as(usize, 1), result.len);
@@ -996,7 +996,7 @@ test "array index: zero index returns empty (1-based)" {
     const values = [_][]const u8{ "a", "b", "c" };
     try ctx.setVar("xs", &values);
 
-    const segs = [_]WordPart{.{ .q = .bare, .t = "$xs[0]" }};
+    const segs = [_]WordPart{.{ .quotes = .none, .text = "$xs[0]" }};
     const result = try expandWord(&ctx, &segs);
 
     try testing.expectEqual(@as(usize, 1), result.len);

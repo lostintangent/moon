@@ -119,7 +119,7 @@ pub fn executeAst(allocator: std.mem.Allocator, state: *State, parsed: ParsedInp
         var ctx = expand.ExpandContext.init(arena_alloc, state);
         defer ctx.deinit();
 
-        const stmt_expanded = try expansion.expandStmt(arena_alloc, &ctx, stmt);
+        const stmt_expanded = try expansion.expandStatement(arena_alloc, &ctx, stmt);
         last_status = try exec.executeStatement(arena_alloc, state, stmt_expanded, parsed.input);
 
         // Break/continue signals bubble up to the enclosing loop

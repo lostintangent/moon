@@ -281,7 +281,7 @@ fn makeCmd(argv: []const []const u8) builtins.ExpandedCmd {
     return builtins.ExpandedCmd{
         .argv = argv,
         .env = &.{},
-        .redirs = &.{},
+        .redirects = &.{},
     };
 }
 

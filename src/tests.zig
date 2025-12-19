@@ -74,7 +74,7 @@ const TestContext = struct {
 
         var stmt_expanded: std.ArrayListUnmanaged(expansion_types.ExpandedStmt) = .empty;
         for (prog.statements) |stmt| {
-            const exp = try expansion.expandStmt(self.arena.allocator(), &self.ctx, stmt);
+            const exp = try expansion.expandStatement(self.arena.allocator(), &self.ctx, stmt);
             try stmt_expanded.append(self.arena.allocator(), exp);
         }
         return expansion_types.ExpandedProgram{ .statements = try stmt_expanded.toOwnedSlice(self.arena.allocator()) };
@@ -111,7 +111,7 @@ test "integration: simple echo" {
     const prog_expanded = try t.expandInput("echo hello");
 
     const expected = [_][]const u8{ "echo", "hello" };
-    try expectArgvEqual(prog_expanded.statements[0].kind.cmd.chains[0].pipeline.cmds[0].argv, &expected);
+    try expectArgvEqual(prog_expanded.statements[0].kind.command.chains[0].pipeline.commands[0].argv, &expected);
 }
 
 test "integration: quote escapes" {
@@ -121,7 +121,7 @@ test "integration: quote escapes" {
 
     const prog_expanded = try t.expandInput("echo \"a b\" 'c\"d'");
 
-    const argv = prog_expanded.statements[0].kind.cmd.chains[0].pipeline.cmds[0].argv;
+    const argv = prog_expanded.statements[0].kind.command.chains[0].pipeline.commands[0].argv;
     try std.testing.expectEqual(@as(usize, 3), argv.len);
     try std.testing.expectEqualStrings("echo", argv[0]);
     try std.testing.expectEqualStrings("a b", argv[1]);
@@ -138,7 +138,7 @@ test "integration: variable list expansion" {
     const prog_expanded = try t.expandInput("echo $xs");
 
     const expected = [_][]const u8{ "echo", "a", "b" };
-    try expectArgvEqual(prog_expanded.statements[0].kind.cmd.chains[0].pipeline.cmds[0].argv, &expected);
+    try expectArgvEqual(prog_expanded.statements[0].kind.command.chains[0].pipeline.commands[0].argv, &expected);
 }
 
 test "integration: cartesian prefix" {
@@ -152,7 +152,7 @@ test "integration: cartesian prefix" {
     const prog_expanded = try t.expandInput("echo pre$xs");
 
     const expected = [_][]const u8{ "echo", "prea", "preb" };
-    try expectArgvEqual(prog_expanded.statements[0].kind.cmd.chains[0].pipeline.cmds[0].argv, &expected);
+    try expectArgvEqual(prog_expanded.statements[0].kind.command.chains[0].pipeline.commands[0].argv, &expected);
 }
 
 test "integration: tilde expansion" {
@@ -165,7 +165,7 @@ test "integration: tilde expansion" {
     const prog_expanded = try t.expandInput("cd ~/src");
 
     const expected = [_][]const u8{ "cd", "/home/jon/src" };
-    try expectArgvEqual(prog_expanded.statements[0].kind.cmd.chains[0].pipeline.cmds[0].argv, &expected);
+    try expectArgvEqual(prog_expanded.statements[0].kind.command.chains[0].pipeline.commands[0].argv, &expected);
 }
 
 test "integration: command substitution" {
@@ -178,7 +178,7 @@ test "integration: command substitution" {
     const prog_expanded = try t.expandInput("echo $(whoami)");
 
     const expected = [_][]const u8{ "echo", "jon" };
-    try expectArgvEqual(prog_expanded.statements[0].kind.cmd.chains[0].pipeline.cmds[0].argv, &expected);
+    try expectArgvEqual(prog_expanded.statements[0].kind.command.chains[0].pipeline.commands[0].argv, &expected);
 }
 
 test "integration: glob expansion" {
@@ -192,7 +192,7 @@ test "integration: glob expansion" {
     const prog_expanded = try t.expandInput("echo src/*.zig");
 
     const expected = [_][]const u8{ "echo", "src/main.zig", "src/util.zig" };
-    try expectArgvEqual(prog_expanded.statements[0].kind.cmd.chains[0].pipeline.cmds[0].argv, &expected);
+    try expectArgvEqual(prog_expanded.statements[0].kind.command.chains[0].pipeline.commands[0].argv, &expected);
 }
 
 test "integration: glob suppressed in quotes" {
@@ -206,7 +206,7 @@ test "integration: glob suppressed in quotes" {
     const prog_expanded = try t.expandInput("echo \"src/*.zig\"");
 
     const expected = [_][]const u8{ "echo", "src/*.zig" };
-    try expectArgvEqual(prog_expanded.statements[0].kind.cmd.chains[0].pipeline.cmds[0].argv, &expected);
+    try expectArgvEqual(prog_expanded.statements[0].kind.command.chains[0].pipeline.commands[0].argv, &expected);
 }
 
 test "integration: single quotes disable expansion" {
@@ -220,7 +220,7 @@ test "integration: single quotes disable expansion" {
     const prog_expanded = try t.expandInput("echo '$xs'");
 
     const expected = [_][]const u8{ "echo", "$xs" };
-    try expectArgvEqual(prog_expanded.statements[0].kind.cmd.chains[0].pipeline.cmds[0].argv, &expected);
+    try expectArgvEqual(prog_expanded.statements[0].kind.command.chains[0].pipeline.commands[0].argv, &expected);
 }
 
 // =============================================================================
@@ -236,7 +236,7 @@ test "config: set builtin sets shell variable" {
     const cmd_expanded = expansion_types.ExpandedCmd{
         .argv = &[_][]const u8{ "set", "MYVAR", "hello" },
         .env = &.{},
-        .redirs = &.{},
+        .redirects = &.{},
     };
 
     const result = var_builtin.builtin.run(&t.state, cmd_expanded);
@@ -257,7 +257,7 @@ test "config: set builtin with multiple values" {
     const cmd_expanded = expansion_types.ExpandedCmd{
         .argv = &[_][]const u8{ "set", "MYLIST", "a", "b", "c" },
         .env = &.{},
-        .redirs = &.{},
+        .redirects = &.{},
     };
 
     const result = var_builtin.builtin.run(&t.state, cmd_expanded);
@@ -283,7 +283,7 @@ test "config: set builtin returns 1 for nonexistent variable" {
     const cmd_expanded = expansion_types.ExpandedCmd{
         .argv = &[_][]const u8{ "set", "NONEXISTENT_VAR_12345" },
         .env = &.{},
-        .redirs = &.{},
+        .redirects = &.{},
     };
 
     const result = var_builtin.builtin.run(&t.state, cmd_expanded);
@@ -371,14 +371,14 @@ test "config: variable set via config is expandable" {
     const prog_expanded = try t.expandInput("echo hello $MYNAME");
 
     const expected = [_][]const u8{ "echo", "hello", "world" };
-    try expectArgvEqual(prog_expanded.statements[0].kind.cmd.chains[0].pipeline.cmds[0].argv, &expected);
+    try expectArgvEqual(prog_expanded.statements[0].kind.command.chains[0].pipeline.commands[0].argv, &expected);
 }
 
 // =============================================================================
 // Function Tests
 // =============================================================================
 
-test "function: definition creates fun_def plan" {
+test "function: definition creates function plan" {
     var t = TestContext.init();
     t.setup();
     defer t.deinit();
@@ -386,7 +386,7 @@ test "function: definition creates fun_def plan" {
     const prog_expanded = try t.expandInput("fun greet\n  echo hello\nend");
 
     try std.testing.expectEqual(@as(usize, 1), prog_expanded.statements.len);
-    const fun_def = prog_expanded.statements[0].kind.fun_def;
+    const fun_def = prog_expanded.statements[0].kind.function;
     try std.testing.expectEqualStrings("greet", fun_def.name);
     try std.testing.expect(std.mem.indexOf(u8, fun_def.body, "echo hello") != null);
 }
@@ -399,7 +399,7 @@ test "function: inline definition" {
     const prog_expanded = try t.expandInput("fun greet echo hello end");
 
     try std.testing.expectEqual(@as(usize, 1), prog_expanded.statements.len);
-    const fun_def = prog_expanded.statements[0].kind.fun_def;
+    const fun_def = prog_expanded.statements[0].kind.function;
     try std.testing.expectEqualStrings("greet", fun_def.name);
 }
 
@@ -412,9 +412,9 @@ test "function: multiple statements after definition" {
 
     try std.testing.expectEqual(@as(usize, 2), prog_expanded.statements.len);
     // First statement is function definition
-    try std.testing.expectEqualStrings("greet", prog_expanded.statements[0].kind.fun_def.name);
+    try std.testing.expectEqualStrings("greet", prog_expanded.statements[0].kind.function.name);
     // Second statement is command
-    const cmd = prog_expanded.statements[1].kind.cmd.chains[0].pipeline.cmds[0];
+    const cmd = prog_expanded.statements[1].kind.command.chains[0].pipeline.commands[0];
     const expected = [_][]const u8{ "echo", "after" };
     try expectArgvEqual(cmd.argv, &expected);
 }
@@ -433,7 +433,7 @@ test "function: body captures multiline content" {
     ;
     const prog_expanded = try t.expandInput(input);
 
-    const fun_def = prog_expanded.statements[0].kind.fun_def;
+    const fun_def = prog_expanded.statements[0].kind.function;
     try std.testing.expectEqualStrings("multi", fun_def.name);
     // Body should contain all lines
     try std.testing.expect(std.mem.indexOf(u8, fun_def.body, "echo line1") != null);
@@ -445,7 +445,7 @@ test "function: body captures multiline content" {
 // If Statement Tests
 // =============================================================================
 
-test "if: simple condition creates if_stmt plan" {
+test "if: simple condition creates if plan" {
     var t = TestContext.init();
     t.setup();
     defer t.deinit();
@@ -453,7 +453,7 @@ test "if: simple condition creates if_stmt plan" {
     const prog_expanded = try t.expandInput("if true\n  echo yes\nend");
 
     try std.testing.expectEqual(@as(usize, 1), prog_expanded.statements.len);
-    const if_stmt = prog_expanded.statements[0].kind.if_stmt;
+    const if_stmt = prog_expanded.statements[0].kind.@"if";
     try std.testing.expectEqual(@as(usize, 1), if_stmt.branches.len);
     try std.testing.expectEqualStrings("true", if_stmt.branches[0].condition);
     try std.testing.expect(std.mem.indexOf(u8, if_stmt.branches[0].body, "echo yes") != null);
@@ -468,7 +468,7 @@ test "if: with else branch" {
     const prog_expanded = try t.expandInput("if false\n  echo no\nelse\n  echo yes\nend");
 
     try std.testing.expectEqual(@as(usize, 1), prog_expanded.statements.len);
-    const if_stmt = prog_expanded.statements[0].kind.if_stmt;
+    const if_stmt = prog_expanded.statements[0].kind.@"if";
     try std.testing.expectEqual(@as(usize, 1), if_stmt.branches.len);
     try std.testing.expectEqualStrings("false", if_stmt.branches[0].condition);
     try std.testing.expect(std.mem.indexOf(u8, if_stmt.branches[0].body, "echo no") != null);
@@ -484,7 +484,7 @@ test "if: inline syntax" {
     const prog_expanded = try t.expandInput("if true; echo yes; end");
 
     try std.testing.expectEqual(@as(usize, 1), prog_expanded.statements.len);
-    const if_stmt = prog_expanded.statements[0].kind.if_stmt;
+    const if_stmt = prog_expanded.statements[0].kind.@"if";
     try std.testing.expectEqual(@as(usize, 1), if_stmt.branches.len);
     try std.testing.expectEqualStrings("true", if_stmt.branches[0].condition);
 }
@@ -498,9 +498,9 @@ test "if: command after if statement" {
 
     try std.testing.expectEqual(@as(usize, 2), prog_expanded.statements.len);
     // First statement is if
-    _ = prog_expanded.statements[0].kind.if_stmt;
+    _ = prog_expanded.statements[0].kind.@"if";
     // Second statement is command
-    const cmd = prog_expanded.statements[1].kind.cmd.chains[0].pipeline.cmds[0];
+    const cmd = prog_expanded.statements[1].kind.command.chains[0].pipeline.commands[0];
     const expected = [_][]const u8{ "echo", "after" };
     try expectArgvEqual(cmd.argv, &expected);
 }
@@ -513,7 +513,7 @@ test "if: else if chain" {
     const prog_expanded = try t.expandInput("if false\n  echo 1\nelse if false\n  echo 2\nelse if true\n  echo 3\nelse\n  echo 4\nend");
 
     try std.testing.expectEqual(@as(usize, 1), prog_expanded.statements.len);
-    const if_stmt = prog_expanded.statements[0].kind.if_stmt;
+    const if_stmt = prog_expanded.statements[0].kind.@"if";
     // Should have 3 branches: if, else if, else if
     try std.testing.expectEqual(@as(usize, 3), if_stmt.branches.len);
     try std.testing.expectEqualStrings("false", if_stmt.branches[0].condition);
@@ -531,7 +531,7 @@ test "if: else if without final else" {
     const prog_expanded = try t.expandInput("if false\n  echo 1\nelse if true\n  echo 2\nend");
 
     try std.testing.expectEqual(@as(usize, 1), prog_expanded.statements.len);
-    const if_stmt = prog_expanded.statements[0].kind.if_stmt;
+    const if_stmt = prog_expanded.statements[0].kind.@"if";
     try std.testing.expectEqual(@as(usize, 2), if_stmt.branches.len);
     try std.testing.expectEqual(@as(?[]const u8, null), if_stmt.else_body);
 }
@@ -540,7 +540,7 @@ test "if: else if without final else" {
 // Break/Continue Tests
 // =============================================================================
 
-test "break: creates break_stmt plan" {
+test "break: creates break plan" {
     var t = TestContext.init();
     t.setup();
     defer t.deinit();
@@ -548,10 +548,10 @@ test "break: creates break_stmt plan" {
     const prog_expanded = try t.expandInput("for i in 1 2 3; if true; break; end; end");
 
     try std.testing.expectEqual(@as(usize, 1), prog_expanded.statements.len);
-    _ = prog_expanded.statements[0].kind.for_stmt;
+    _ = prog_expanded.statements[0].kind.@"for";
 }
 
-test "continue: creates continue_stmt plan" {
+test "continue: creates continue plan" {
     var t = TestContext.init();
     t.setup();
     defer t.deinit();
@@ -559,7 +559,7 @@ test "continue: creates continue_stmt plan" {
     const prog_expanded = try t.expandInput("for i in 1 2 3; if true; continue; end; end");
 
     try std.testing.expectEqual(@as(usize, 1), prog_expanded.statements.len);
-    _ = prog_expanded.statements[0].kind.for_stmt;
+    _ = prog_expanded.statements[0].kind.@"for";
 }
 
 // =============================================================================
@@ -574,7 +574,7 @@ test "capture: basic string capture" {
     const prog_expanded = try t.expandInput("echo hello => x");
 
     try std.testing.expectEqual(@as(usize, 1), prog_expanded.statements.len);
-    const cmd_stmt = prog_expanded.statements[0].kind.cmd;
+    const cmd_stmt = prog_expanded.statements[0].kind.command;
     try std.testing.expect(cmd_stmt.capture != null);
     try std.testing.expectEqual(ast.CaptureMode.string, cmd_stmt.capture.?.mode);
     try std.testing.expectEqualStrings("x", cmd_stmt.capture.?.variable);
@@ -588,7 +588,7 @@ test "capture: lines capture" {
     const prog_expanded = try t.expandInput("ls =>@ files");
 
     try std.testing.expectEqual(@as(usize, 1), prog_expanded.statements.len);
-    const cmd_stmt = prog_expanded.statements[0].kind.cmd;
+    const cmd_stmt = prog_expanded.statements[0].kind.command;
     try std.testing.expect(cmd_stmt.capture != null);
     try std.testing.expectEqual(ast.CaptureMode.lines, cmd_stmt.capture.?.mode);
     try std.testing.expectEqualStrings("files", cmd_stmt.capture.?.variable);
@@ -606,7 +606,7 @@ test "for: basic loop" {
     const prog_expanded = try t.expandInput("for x in a b c; echo $x; end");
 
     try std.testing.expectEqual(@as(usize, 1), prog_expanded.statements.len);
-    const for_stmt = prog_expanded.statements[0].kind.for_stmt;
+    const for_stmt = prog_expanded.statements[0].kind.@"for";
     try std.testing.expectEqualStrings("x", for_stmt.variable);
     try std.testing.expectEqualStrings("a b c", for_stmt.items_source);
     try std.testing.expect(std.mem.indexOf(u8, for_stmt.body, "echo") != null);
@@ -620,7 +620,7 @@ test "for: multi-line syntax" {
     const prog_expanded = try t.expandInput("for i in 1 2 3\necho $i\nend");
 
     try std.testing.expectEqual(@as(usize, 1), prog_expanded.statements.len);
-    const for_stmt = prog_expanded.statements[0].kind.for_stmt;
+    const for_stmt = prog_expanded.statements[0].kind.@"for";
     try std.testing.expectEqualStrings("i", for_stmt.variable);
     try std.testing.expectEqualStrings("1 2 3", for_stmt.items_source);
 }
@@ -629,7 +629,7 @@ test "for: multi-line syntax" {
 // Command Substitution Tests
 // =============================================================================
 
-test "cmdsub: basic substitution" {
+test "commandsub: basic substitution" {
     var t = TestContext.init();
     t.setup();
     defer t.deinit();
@@ -640,14 +640,14 @@ test "cmdsub: basic substitution" {
     const prog_expanded = try t.expandInput("echo $(echo hello)");
 
     try std.testing.expectEqual(@as(usize, 1), prog_expanded.statements.len);
-    const cmd = prog_expanded.statements[0].kind.cmd.chains[0].pipeline.cmds[0];
+    const cmd = prog_expanded.statements[0].kind.command.chains[0].pipeline.commands[0];
     // After expansion, argv should be ["echo", "hello"]
     try std.testing.expectEqual(@as(usize, 2), cmd.argv.len);
     try std.testing.expectEqualStrings("echo", cmd.argv[0]);
     try std.testing.expectEqualStrings("hello", cmd.argv[1]);
 }
 
-test "cmdsub: multi-line splits into list" {
+test "commandsub: multi-line splits into list" {
     var t = TestContext.init();
     t.setup();
     defer t.deinit();
@@ -658,7 +658,7 @@ test "cmdsub: multi-line splits into list" {
     const prog_expanded = try t.expandInput("echo $(echo lines)");
 
     try std.testing.expectEqual(@as(usize, 1), prog_expanded.statements.len);
-    const cmd = prog_expanded.statements[0].kind.cmd.chains[0].pipeline.cmds[0];
+    const cmd = prog_expanded.statements[0].kind.command.chains[0].pipeline.commands[0];
     // After expansion, argv should be ["echo", "a", "b", "c"]
     try std.testing.expectEqual(@as(usize, 4), cmd.argv.len);
     try std.testing.expectEqualStrings("echo", cmd.argv[0]);

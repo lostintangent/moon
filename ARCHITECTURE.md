@@ -268,7 +268,7 @@ The expander combines AST structure with expanded values to produce:
 ExpandedCmd {
     .argv = ["echo", "Alice", "a.txt", "b.txt"],
     .env = [],
-    .redirs = [],
+    .redirects = [],
 }
 ```
 
@@ -451,7 +451,7 @@ Parse all statements upfront, but expand/execute one at a time:
 ```zig
 for (ast.statements) |stmt| {
     var ctx = ExpandContext.init(allocator, state);
-    const expanded = try expandStmt(allocator, &ctx, stmt);
+    const expanded = try expandStatement(allocator, &ctx, stmt);
     _ = try executeStatement(allocator, state, expanded, input);
 }
 ```
@@ -503,7 +503,7 @@ ExpandedStmt {
 
 // If-statement with branches for if/else-if chains
 ExpandedStmt {
-    .kind = .if_stmt: ast.IfStmt {
+    .kind = .@"if": ast.IfStatement {
         .branches = &.{
             .{ .condition = "test $x -lt 10", .body = "echo small" },
             .{ .condition = "test $x -lt 100", .body = "echo large" },
@@ -526,10 +526,10 @@ loop_continue: bool = false,
 fn_return: bool = false,
 
 // In execution:
-// 1. break_stmt sets state.loop_break = true
+// 1. break sets state.loop_break = true
 // 2. Loop executor checks flag after each iteration/statement
 // 3. Flag is reset at end of loop iteration (continue) or loop exit (break)
-// 4. return_stmt sets state.fn_return = true and state.status
+// 4. return sets state.fn_return = true and state.status
 // 5. Function executor checks fn_return and resets it after function completes
 ```
 

@@ -12,9 +12,8 @@ const state_mod = @import("../../runtime/state.zig");
 const State = state_mod.State;
 const builtins = @import("../../runtime/builtins.zig");
 const io = @import("../../terminal/io.zig");
-const redir = @import("redir.zig");
+const redirect = @import("redirect.zig");
 const jobs = @import("jobs.zig");
-const interpreter_mod = @import("../interpreter.zig");
 
 const ExpandedCmd = expansion_types.ExpandedCmd;
 const ExpandedPipeline = expansion_types.ExpandedPipeline;
@@ -36,26 +35,16 @@ pub fn buildArgv(allocator: std.mem.Allocator, cmd: ExpandedCmd) !std.ArrayListU
 
 /// Execute a pipeline in foreground, checking for aliases, builtins, and functions first
 pub fn executePipelineForeground(allocator: std.mem.Allocator, state: *State, pipeline: ExpandedPipeline, tryRunFunction: *const fn (std.mem.Allocator, *State, ExpandedCmd) ?u8) !u8 {
-    if (pipeline.cmds.len == 0) return 0;
-
-    // Check if any command in the pipeline is an alias - if so, expand and re-execute
-    for (pipeline.cmds) |cmd| {
-        if (cmd.argv.len > 0) {
-            if (state.getAlias(cmd.argv[0])) |_| {
-                // Reconstruct the full pipeline command with alias expansion
-                return executeExpandedPipeline(allocator, state, pipeline);
-            }
-        }
-    }
+    if (pipeline.commands.len == 0) return 0;
 
     // Single command - check for builtin first, then functions
-    if (pipeline.cmds.len == 1) {
-        const cmd = pipeline.cmds[0];
+    if (pipeline.commands.len == 1) {
+        const cmd = pipeline.commands[0];
         if (cmd.argv.len > 0) {
             // Check if it's a builtin
             if (builtins.isBuiltin(cmd.argv[0])) {
                 // If builtin has redirections, fork to apply them properly
-                if (cmd.redirs.len > 0) {
+                if (cmd.redirects.len > 0) {
                     return try executeBuiltinWithRedirects(allocator, state, cmd);
                 }
                 // No redirections - run builtin directly
@@ -64,14 +53,18 @@ pub fn executePipelineForeground(allocator: std.mem.Allocator, state: *State, pi
                 }
             }
             // Then user-defined functions
-            if (tryRunFunction(allocator, state, cmd)) |status| {
+            if (cmd.redirects.len > 0) {
+                if (state.getFunction(cmd.argv[0])) |_| {
+                    return try executeFunctionWithRedirects(allocator, state, cmd, tryRunFunction);
+                }
+            } else if (tryRunFunction(allocator, state, cmd)) |status| {
                 return status;
             }
         }
-        return try executePipelineWithJobControl(allocator, state, pipeline);
+        return try executePipelineWithJobControl(allocator, state, pipeline, tryRunFunction);
     }
 
-    return try executePipelineWithJobControl(allocator, state, pipeline);
+    return try executePipelineWithJobControl(allocator, state, pipeline, tryRunFunction);
 }
 
 /// Execute a builtin command with file redirections by forking
@@ -80,7 +73,7 @@ fn executeBuiltinWithRedirects(_: std.mem.Allocator, state: *State, cmd: Expande
 
     if (pid == 0) {
         // Child: apply redirections, then run builtin
-        redir.apply(cmd.redirs) catch {
+        redirect.apply(cmd.redirects) catch {
             std.posix.exit(1);
         };
 
@@ -92,53 +85,36 @@ fn executeBuiltinWithRedirects(_: std.mem.Allocator, state: *State, cmd: Expande
     return waitForChild(pid);
 }
 
-/// Expand aliases in a pipeline and re-execute
-fn executeExpandedPipeline(allocator: std.mem.Allocator, state: *State, pipeline: ExpandedPipeline) u8 {
-    var full_cmd: std.ArrayListUnmanaged(u8) = .empty;
-    defer full_cmd.deinit(allocator);
+/// Execute a user-defined function with redirects in a forked child
+fn executeFunctionWithRedirects(allocator: std.mem.Allocator, state: *State, cmd: ExpandedCmd, tryRunFunction: *const fn (std.mem.Allocator, *State, ExpandedCmd) ?u8) !u8 {
+    const pid = try std.posix.fork();
 
-    for (pipeline.cmds, 0..) |cmd, cmd_idx| {
-        if (cmd_idx > 0) {
-            full_cmd.appendSlice(allocator, " | ") catch return 1;
-        }
+    if (pid == 0) {
+        redirect.apply(cmd.redirects) catch {
+            std.posix.exit(1);
+        };
 
-        // Check if this command's first word is an alias
-        if (cmd.argv.len > 0) {
-            if (state.getAlias(cmd.argv[0])) |expansion| {
-                // Use expansion instead of original command
-                full_cmd.appendSlice(allocator, expansion) catch return 1;
-                // Add remaining arguments
-                for (cmd.argv[1..]) |arg| {
-                    full_cmd.append(allocator, ' ') catch return 1;
-                    full_cmd.appendSlice(allocator, arg) catch return 1;
-                }
-            } else {
-                // Use original arguments
-                for (cmd.argv, 0..) |arg, i| {
-                    if (i > 0) full_cmd.append(allocator, ' ') catch return 1;
-                    full_cmd.appendSlice(allocator, arg) catch return 1;
-                }
-            }
-        }
+        const status = tryRunFunction(allocator, state, cmd) orelse 127;
+        std.posix.exit(status);
     }
 
-    return interpreter_mod.execute(allocator, state, full_cmd.items) catch |err| {
-        io.printError("alias expansion: {}\n", .{err});
-        return 1;
-    };
+    return waitForChild(pid);
 }
 
 /// Execute a pipeline in a child process (no job control needed)
-pub fn executePipelineInChild(allocator: std.mem.Allocator, pipeline: ExpandedPipeline) !u8 {
-    if (pipeline.cmds.len == 0) return 0;
+pub fn executePipelineInChild(allocator: std.mem.Allocator, state: ?*State, pipeline: ExpandedPipeline, tryRunFunction: ?*const fn (std.mem.Allocator, *State, ExpandedCmd) ?u8) !u8 {
+    if (pipeline.commands.len == 0) return 0;
 
     // In child, we don't need job control - just execute
-    if (pipeline.cmds.len == 1) {
-        return try executeCommandSimple(allocator, pipeline.cmds[0]);
+    if (pipeline.commands.len == 1) {
+        if (state) |s| {
+            return try executeSingleCommand(allocator, s, pipeline.commands[0], tryRunFunction);
+        }
+        return try executeCommandSimple(allocator, pipeline.commands[0]);
     }
 
     // Multi-command pipeline
-    const n = pipeline.cmds.len;
+    const n = pipeline.commands.len;
     var pipes: std.ArrayListUnmanaged([2]std.posix.fd_t) = .empty;
     defer {
         for (pipes.items) |pipe| {
@@ -156,7 +132,7 @@ pub fn executePipelineInChild(allocator: std.mem.Allocator, pipeline: ExpandedPi
     var pids: std.ArrayListUnmanaged(std.posix.pid_t) = .empty;
     defer pids.deinit(allocator);
 
-    for (pipeline.cmds, 0..) |cmd, i| {
+    for (pipeline.commands, 0..) |cmd, i| {
         const stdin_fd: ?std.posix.fd_t = if (i == 0) null else pipes.items[i - 1][0];
         const stdout_fd: ?std.posix.fd_t = if (i == n - 1) null else pipes.items[i][1];
 
@@ -168,7 +144,7 @@ pub fn executePipelineInChild(allocator: std.mem.Allocator, pipeline: ExpandedPi
                 std.posix.close(pipe[0]);
                 std.posix.close(pipe[1]);
             }
-            execCommand(allocator, cmd);
+            execCommandWithState(allocator, state, tryRunFunction, cmd);
         }
 
         try pids.append(allocator, child_pid);
@@ -188,9 +164,38 @@ pub fn executePipelineInChild(allocator: std.mem.Allocator, pipeline: ExpandedPi
     return last_status;
 }
 
+fn executeSingleCommand(allocator: std.mem.Allocator, state: *State, cmd: ExpandedCmd, tryRunFunction: ?*const fn (std.mem.Allocator, *State, ExpandedCmd) ?u8) !u8 {
+    if (cmd.argv.len == 0) return 0;
+
+    // Builtin fast paths
+    if (builtins.isBuiltin(cmd.argv[0])) {
+        if (cmd.redirects.len > 0) {
+            return try executeBuiltinWithRedirects(allocator, state, cmd);
+        }
+        if (builtins.tryRun(state, cmd)) |status| {
+            return status;
+        }
+    }
+
+    // Functions (only when provided)
+    if (tryRunFunction) |f| {
+        if (cmd.argv.len > 0) {
+            if (cmd.redirects.len > 0) {
+                if (state.getFunction(cmd.argv[0])) |_| {
+                    return try executeFunctionWithRedirects(allocator, state, cmd, f);
+                }
+            } else if (f(allocator, state, cmd)) |status| {
+                return status;
+            }
+        }
+    }
+
+    return try executeCommandSimple(allocator, cmd);
+}
+
 /// Execute a pipeline with full job control (terminal handling, process groups)
-pub fn executePipelineWithJobControl(allocator: std.mem.Allocator, state: *State, pipeline: ExpandedPipeline) !u8 {
-    const n = pipeline.cmds.len;
+pub fn executePipelineWithJobControl(allocator: std.mem.Allocator, state: *State, pipeline: ExpandedPipeline, tryRunFunction: *const fn (std.mem.Allocator, *State, ExpandedCmd) ?u8) !u8 {
+    const n = pipeline.commands.len;
 
     // Create pipes for multi-command pipeline
     var pipes: std.ArrayListUnmanaged([2]std.posix.fd_t) = .empty;
@@ -213,7 +218,7 @@ pub fn executePipelineWithJobControl(allocator: std.mem.Allocator, state: *State
 
     var pgid: std.posix.pid_t = 0;
 
-    for (pipeline.cmds, 0..) |cmd, i| {
+    for (pipeline.commands, 0..) |cmd, i| {
         const stdin_fd: ?std.posix.fd_t = if (i == 0) null else pipes.items[i - 1][0];
         const stdout_fd: ?std.posix.fd_t = if (i == n - 1) null else pipes.items[i][1];
 
@@ -243,7 +248,7 @@ pub fn executePipelineWithJobControl(allocator: std.mem.Allocator, state: *State
                 std.posix.close(pipe[1]);
             }
 
-            execCommandWithState(allocator, state, cmd);
+            execCommandWithState(allocator, state, tryRunFunction, cmd);
         }
 
         // Parent: set process group (race with child)
@@ -308,13 +313,13 @@ pub fn setupPipeRedirects(stdin_fd: ?std.posix.fd_t, stdout_fd: ?std.posix.fd_t)
 
 /// Execute command in child process (does not return)
 pub fn execCommand(allocator: std.mem.Allocator, cmd: ExpandedCmd) noreturn {
-    execCommandWithState(allocator, null, cmd);
+    execCommandWithState(allocator, null, null, cmd);
 }
 
 /// Execute command in child process with optional state for builtins (does not return)
-pub fn execCommandWithState(allocator: std.mem.Allocator, state: ?*State, cmd: ExpandedCmd) noreturn {
+pub fn execCommandWithState(allocator: std.mem.Allocator, state: ?*State, tryRunFunction: ?*const fn (std.mem.Allocator, *State, ExpandedCmd) ?u8, cmd: ExpandedCmd) noreturn {
     // Apply file redirections
-    redir.apply(cmd.redirs) catch {
+    redirect.apply(cmd.redirects) catch {
         std.posix.exit(1);
     };
 
@@ -323,6 +328,11 @@ pub fn execCommandWithState(allocator: std.mem.Allocator, state: ?*State, cmd: E
         if (cmd.argv.len > 0 and builtins.isBuiltin(cmd.argv[0])) {
             const status = builtins.tryRun(s, cmd) orelse 127;
             std.posix.exit(status);
+        }
+        if (tryRunFunction) |f| {
+            if (f(allocator, s, cmd)) |status| {
+                std.posix.exit(status);
+            }
         }
     }
 

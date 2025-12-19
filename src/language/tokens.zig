@@ -1,28 +1,40 @@
 //! Token types and related definitions for the Oshen shell lexer.
 //!
 //! Type hierarchy:
-//! - `Token`: a lexical unit produced by the lexer, containing:
-//!   - `TokenSpan`: source position (line/column and byte indices)
-//!   - `TokenData`: one of word, operator, or separator
-//! - `WordPart`: a segment of a word token with its quoting context
-//!   (e.g., `hello"world"` produces two WordParts: one bare, one double-quoted)
+//! - `Token`: A lexical unit produced by the lexer, containing:
+//!   - `TokenKind`: A union of either a word, operator, or separator
+//!   - `TokenSpan`: The source position of the token  (line/column and byte indices) in the script/command
+//! - `WordPart`: A segment of a word token with its quoting context
+//!       (e.g., `hello"world"` produces two WordParts: one unquoted, one double-quoted)
+//!
+//! Note: Unlike most programming languages, keywords (if, for, while, etc.) are
+//! not a distinct token type. This is because shell keywords are context-sensitive:
+//! `if` in command position starts a conditional, but `echo if` just prints "if".
+//! Additionally, quoting escapes keyword interpretation: `"if"` is always a word.
+//! The parser determines keyword semantics based on position; the lexer just
+//! produces generic word tokens.
 //!
 //! Also provides operator/keyword tables for O(1) lookups.
 
 const std = @import("std");
 
+/// Indicates how a word segment was quoted in the source.
+/// Used by the expander to determine which expansions apply:
+/// - `none`: bare word, all expansions apply
+/// - `double`: double-quoted, variable/command expansion only
+/// - `single`: single-quoted, no expansion (literal)
 pub const QuoteKind = enum {
-    bare,
-    dq, // double quotes
-    sq, // single quotes
+    none,
+    double,
+    single,
 };
 
 pub const WordPart = struct {
-    q: QuoteKind,
-    t: []const u8,
+    quotes: QuoteKind,
+    text: []const u8,
 
     pub fn eql(self: WordPart, other: WordPart) bool {
-        return self.q == other.q and std.mem.eql(u8, self.t, other.t);
+        return self.quotes == other.quotes and std.mem.eql(u8, self.text, other.text);
     }
 };
 
@@ -38,117 +50,74 @@ pub const TokenSpan = struct {
     end_col: usize,
     start_index: usize,
     end_index: usize,
-
-    pub fn init(start_line: usize, start_col: usize, end_line: usize, end_col: usize, start_index: usize, end_index: usize) TokenSpan {
-        return .{
-            .start_line = start_line,
-            .start_col = start_col,
-            .end_line = end_line,
-            .end_col = end_col,
-            .start_index = start_index,
-            .end_index = end_index,
-        };
-    }
 };
 
-pub const TokenKind = enum {
-    word,
-    op,
-    sep,
-};
-
-/// Token data - tagged union for type-safe access
-pub const TokenData = union(TokenKind) {
+pub const TokenKind = union(enum) {
     word: []const WordPart,
-    op: []const u8,
-    sep: []const u8,
+    operator: []const u8,
+    separator: []const u8,
 };
 
 pub const Token = struct {
-    data: TokenData,
+    kind: TokenKind,
     span: TokenSpan,
 
     pub fn initWord(word_parts: []const WordPart, tok_span: TokenSpan) Token {
-        return .{ .data = .{ .word = word_parts }, .span = tok_span };
+        return .{ .kind = .{ .word = word_parts }, .span = tok_span };
     }
 
     pub fn initOp(op_text: []const u8, tok_span: TokenSpan) Token {
-        return .{ .data = .{ .op = op_text }, .span = tok_span };
+        return .{ .kind = .{ .operator = op_text }, .span = tok_span };
     }
 
     pub fn initSep(sep_text: []const u8, tok_span: TokenSpan) Token {
-        return .{ .data = .{ .sep = sep_text }, .span = tok_span };
-    }
-
-    /// Get the token kind
-    pub fn kind(self: Token) TokenKind {
-        return self.data;
-    }
-
-    /// Get word parts (only valid for word tokens)
-    pub fn parts(self: Token) ?[]const WordPart {
-        return switch (self.data) {
-            .word => |p| p,
-            else => null,
-        };
-    }
-
-    /// Get text (only valid for op/sep tokens)
-    pub fn text(self: Token) ?[]const u8 {
-        return switch (self.data) {
-            .op => |t| t,
-            .sep => |t| t,
-            .word => null,
-        };
+        return .{ .kind = .{ .separator = sep_text }, .span = tok_span };
     }
 };
 
-// Operators recognized by the lexer
+/// Operators recognized by the lexer.
+/// IMPORTANT: Ordered by descending length so longer operators match first.
+/// (e.g., "2>&1" must precede "2>" to avoid premature matching)
 pub const operators = [_][]const u8{
-    "=>@", "2>&1", "2>>", "&>", "|>", "&&", "||", "=>", "2>", ">>", "|", "&", "<", ">",
+    "2>&1", "=>@", "2>>", "&>", "|>", "&&", "||", "=>", "2>", ">>", "|", "&", "<", ">",
 };
 
-pub const keywords = [_][]const u8{ "and", "or", "fun", "end", "if", "else", "for", "in", "while", "break", "continue", "return" };
-
-/// Check if a word is a keyword
-pub fn isKeyword(word: []const u8) bool {
-    for (keywords) |kw| {
-        if (std.mem.eql(u8, word, kw)) return true;
+/// Helper to create a compile-time string set from a simple list of strings.
+/// Avoids the verbose `.{ "str", {} }` syntax required by StaticStringMap.
+fn stringSet(comptime strings: []const []const u8) std.StaticStringMap(void) {
+    comptime {
+        var kvs: [strings.len]struct { []const u8, void } = undefined;
+        for (strings, 0..) |s, i| {
+            kvs[i] = .{ s, {} };
+        }
+        return std.StaticStringMap(void).initComptime(&kvs);
     }
-    return false;
 }
 
-/// Compile-time set for O(1) redirection operator lookup
-pub const redir_ops = std.StaticStringMap(void).initComptime(.{
-    .{ "<", {} },
-    .{ ">", {} },
-    .{ ">>", {} },
-    .{ "2>", {} },
-    .{ "2>>", {} },
-    .{ "&>", {} },
-    .{ "2>&1", {} },
-});
+const keywords = stringSet(&.{ "and", "or", "fun", "end", "if", "else", "for", "in", "while", "break", "continue", "return" });
+pub fn isKeyword(word: []const u8) bool {
+    return keywords.has(word);
+}
 
-/// Compile-time set for O(1) pipe operator lookup
-pub const pipe_ops = std.StaticStringMap(void).initComptime(.{
-    .{ "|", {} },
-    .{ "|>", {} },
-});
+const redirect_operators = stringSet(&.{ "<", ">", ">>", "2>", "2>>", "&>", "2>&1" });
+pub fn isRedirectOperator(text: []const u8) bool {
+    return redirect_operators.has(text);
+}
 
-/// Compile-time set for O(1) logical operator lookup
-pub const logical_ops = std.StaticStringMap(void).initComptime(.{
-    .{ "and", {} },
-    .{ "or", {} },
-    .{ "&&", {} },
-    .{ "||", {} },
-});
+const pipe_operators = stringSet(&.{ "|", "|>" });
+pub fn isPipeOperator(text: []const u8) bool {
+    return pipe_operators.has(text);
+}
 
-/// Check if a character is valid in an identifier (variable names, etc.)
+const logical_operators = stringSet(&.{ "and", "or", "&&", "||" });
+pub fn isLogicalOperator(text: []const u8) bool {
+    return logical_operators.has(text);
+}
+
 pub fn isIdentChar(c: u8) bool {
     return (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or (c >= '0' and c <= '9') or c == '_';
 }
 
-/// Check if a character can start an identifier
 pub fn isIdentStart(c: u8) bool {
     return (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or c == '_';
 }

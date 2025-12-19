@@ -47,24 +47,24 @@ pub fn execute(allocator: std.mem.Allocator, state: *State, prog: ExpandedProgra
 
 pub fn executeStatement(allocator: std.mem.Allocator, state: *State, stmt: ExpandedStmt, cmd_str: []const u8) !u8 {
     return switch (stmt.kind) {
-        .cmd => |cmd_stmt| try executeCmdStatement(allocator, state, cmd_stmt, cmd_str),
-        .fun_def => |fun_def| {
+        .command => |cmd_stmt| try executeCmdStatement(allocator, state, cmd_stmt, cmd_str),
+        .function => |fun_def| {
             // Register the function in state
             try state.setFunction(fun_def.name, fun_def.body);
             return 0;
         },
-        .if_stmt => |if_stmt| executeIfStatement(allocator, state, if_stmt),
-        .for_stmt => |for_stmt| executeForStatement(allocator, state, for_stmt),
-        .while_stmt => |while_stmt| executeWhileStatement(allocator, state, while_stmt),
-        .break_stmt => {
+        .@"if" => |if_stmt| executeIfStatement(allocator, state, if_stmt),
+        .@"for" => |for_stmt| executeForStatement(allocator, state, for_stmt),
+        .@"while" => |while_stmt| executeWhileStatement(allocator, state, while_stmt),
+        .@"break" => {
             state.loop_break = true;
             return 0;
         },
-        .continue_stmt => {
+        .@"continue" => {
             state.loop_continue = true;
             return 0;
         },
-        .return_stmt => |opt_status_str| {
+        .@"return" => |opt_status_str| {
             state.fn_return = true;
             if (opt_status_str) |status_str| {
                 // Parse the expanded string as u8 and set as status
@@ -89,8 +89,23 @@ fn executeBody(allocator: std.mem.Allocator, state: *State, body: []const u8, co
     };
 }
 
+const LoopSignal = enum { break_, continue_, ret };
+
+fn consumeLoopSignal(state: *State) ?LoopSignal {
+    if (state.fn_return) return .ret;
+    if (state.loop_break) {
+        state.loop_break = false;
+        return .break_;
+    }
+    if (state.loop_continue) {
+        state.loop_continue = false;
+        return .continue_;
+    }
+    return null;
+}
+
 /// Execute an if statement by evaluating condition branches and running appropriate branch
-fn executeIfStatement(allocator: std.mem.Allocator, state: *State, if_stmt: expansion_types.ast.IfStmt) u8 {
+fn executeIfStatement(allocator: std.mem.Allocator, state: *State, if_stmt: expansion_types.ast.IfStatement) u8 {
     // Try each branch in order (first is "if", rest are "else if")
     for (if_stmt.branches) |branch| {
         const cond_status = executeBody(allocator, state, branch.condition, "if: condition error");
@@ -118,7 +133,7 @@ fn executeIfStatement(allocator: std.mem.Allocator, state: *State, if_stmt: expa
 ///
 /// OPTIMIZATION: Parses body once upfront, then executes the pre-parsed AST
 /// on each iteration. This avoids re-lexing/parsing on every loop iteration.
-fn executeForStatement(allocator: std.mem.Allocator, state: *State, for_stmt: expansion_types.ast.ForStmt) u8 {
+fn executeForStatement(allocator: std.mem.Allocator, state: *State, for_stmt: expansion_types.ast.ForStatement) u8 {
     // Arena for items expansion and body AST caching
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
@@ -137,8 +152,8 @@ fn executeForStatement(allocator: std.mem.Allocator, state: *State, for_stmt: ex
     defer expand_ctx.deinit();
 
     for (tokens) |tok| {
-        if (tok.parts()) |segs| {
-            const expanded = expand.expandWord(&expand_ctx, segs) catch |err| {
+        if (tok.kind == .word) {
+            const expanded = expand.expandWord(&expand_ctx, tok.kind.word) catch |err| {
                 io.printError("for: expand error: {}\n", .{err});
                 return 1;
             };
@@ -171,21 +186,11 @@ fn executeForStatement(allocator: std.mem.Allocator, state: *State, for_stmt: ex
             return 1;
         };
 
-        // Check for return - propagate up without resetting
-        if (state.fn_return) {
-            return state.status;
-        }
-
-        // Check for break
-        if (state.loop_break) {
-            state.loop_break = false;
-            break;
-        }
-
-        // Check for continue - just reset the flag and continue to next iteration
-        if (state.loop_continue) {
-            state.loop_continue = false;
-        }
+        if (consumeLoopSignal(state)) |signal| switch (signal) {
+            .ret => return state.status,
+            .break_ => break,
+            .continue_ => continue,
+        };
     }
 
     return last_status;
@@ -196,7 +201,7 @@ fn executeForStatement(allocator: std.mem.Allocator, state: *State, for_stmt: ex
 /// OPTIMIZATION: Parses condition and body once upfront, then executes the
 /// pre-parsed AST on each iteration. This avoids re-lexing/parsing on every
 /// loop iteration - only expansion (variable substitution, globs) happens per-iteration.
-fn executeWhileStatement(allocator: std.mem.Allocator, state: *State, while_stmt: expansion_types.ast.WhileStmt) u8 {
+fn executeWhileStatement(allocator: std.mem.Allocator, state: *State, while_stmt: expansion_types.ast.WhileStatement) u8 {
     // Parse arena - lives for entire loop duration, holds the cached ASTs
     var parse_arena = std.heap.ArenaAllocator.init(allocator);
     defer parse_arena.deinit();
@@ -233,21 +238,11 @@ fn executeWhileStatement(allocator: std.mem.Allocator, state: *State, while_stmt
             return 1;
         };
 
-        // Check for return - propagate up without resetting
-        if (state.fn_return) {
-            return state.status;
-        }
-
-        // Check for break
-        if (state.loop_break) {
-            state.loop_break = false;
-            break;
-        }
-
-        // Check for continue - just reset the flag and continue to next iteration
-        if (state.loop_continue) {
-            state.loop_continue = false;
-        }
+        if (consumeLoopSignal(state)) |signal| switch (signal) {
+            .ret => return state.status,
+            .break_ => break,
+            .continue_ => continue,
+        };
     }
 
     return last_status;
@@ -255,7 +250,7 @@ fn executeWhileStatement(allocator: std.mem.Allocator, state: *State, while_stmt
 
 fn executeCmdStatement(allocator: std.mem.Allocator, state: *State, stmt: expansion_types.ExpandedCmdStmt, cmd_str: []const u8) !u8 {
     // For background jobs, we run the pipeline in a process group
-    if (stmt.bg) {
+    if (stmt.background) {
         return executeBackgroundJob(allocator, state, stmt, cmd_str);
     }
 
@@ -269,16 +264,15 @@ fn executeCmdStatement(allocator: std.mem.Allocator, state: *State, stmt: expans
     var should_continue = true;
 
     for (stmt.chains) |chain| {
-        // Check conditional logic using StaticStringMap-compatible checks
-        if (chain.op) |op| {
-            const is_and = std.mem.eql(u8, op, "and") or std.mem.eql(u8, op, "&&");
-            const is_or = std.mem.eql(u8, op, "or") or std.mem.eql(u8, op, "||");
-
-            if (is_and and last_status != 0) {
+        // Check conditional logic using explicit operator enum
+        switch (chain.op) {
+            .none => {},
+            .@"and" => if (last_status != 0) {
                 should_continue = false;
-            } else if (is_or and last_status == 0) {
+            },
+            .@"or" => if (last_status == 0) {
                 should_continue = false;
-            }
+            },
         }
 
         if (!should_continue) {
@@ -301,8 +295,8 @@ fn executeCmdWithCapture(allocator: std.mem.Allocator, state: *State, stmt: expa
             var last_status: u8 = 0;
             for (stmt.chains) |chain| {
                 // For single commands, try builtin first, then external
-                if (chain.pipeline.cmds.len == 1) {
-                    const cmd = chain.pipeline.cmds[0];
+                if (chain.pipeline.commands.len == 1) {
+                    const cmd = chain.pipeline.commands[0];
                     if (cmd.argv.len > 0) {
                         if (builtins.tryRun(state, cmd)) |status| {
                             last_status = status;
@@ -311,7 +305,7 @@ fn executeCmdWithCapture(allocator: std.mem.Allocator, state: *State, stmt: expa
                     }
                 }
                 // External command or pipeline
-                last_status = pipeline.executePipelineInChild(allocator, chain.pipeline) catch 1;
+                last_status = pipeline.executePipelineInChild(allocator, state, chain.pipeline, &tryRunFunction) catch 1;
             }
             std.posix.exit(last_status);
         },
@@ -365,7 +359,7 @@ fn executeBackgroundJob(allocator: std.mem.Allocator, state: *State, stmt: expan
         // Execute the statement chains
         var last_status: u8 = 0;
         for (stmt.chains) |chain| {
-            last_status = pipeline.executePipelineInChild(allocator, chain.pipeline) catch 1;
+            last_status = pipeline.executePipelineInChild(allocator, state, chain.pipeline, &tryRunFunction) catch 1;
         }
         std.posix.exit(last_status);
     }
@@ -388,13 +382,7 @@ fn executeBackgroundJob(allocator: std.mem.Allocator, state: *State, stmt: expan
     return 0;
 }
 
-/// Try to execute a user-defined function.
-/// Returns the exit status if it was a function, null otherwise.
-/// Order: builtins > functions > external commands
-///
-/// Note: This function catches errors internally and returns a status code
-/// to break the error set cycle (exec → pipeline → exec).
-fn tryRunFunction(allocator: std.mem.Allocator, state: *State, cmd: ExpandedCmd) ?u8 {
+fn runFunctionWithArgs(allocator: std.mem.Allocator, state: *State, cmd: ExpandedCmd) ?u8 {
     if (cmd.argv.len == 0) return null;
 
     const name = cmd.argv[0];
@@ -437,4 +425,14 @@ fn tryRunFunction(allocator: std.mem.Allocator, state: *State, cmd: ExpandedCmd)
     }
 
     return status;
+}
+
+/// Try to execute a user-defined function.
+/// Returns the exit status if it was a function, null otherwise.
+/// Order: builtins > functions > external commands
+///
+/// Note: This function catches errors internally and returns a status code
+/// to break the error set cycle (exec → pipeline → exec).
+fn tryRunFunction(allocator: std.mem.Allocator, state: *State, cmd: ExpandedCmd) ?u8 {
+    return runFunctionWithArgs(allocator, state, cmd);
 }
