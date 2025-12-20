@@ -71,64 +71,102 @@ pub const Parser = struct {
         };
     }
 
-    fn peek(self: *Parser) ?Token {
+    // =========================================================================
+    // Token navigation
+    // =========================================================================
+
+    /// Returns the current token without advancing, or null if at end.
+    inline fn peek(self: *const Parser) ?Token {
+        return if (self.pos < self.tokens.len) self.tokens[self.pos] else null;
+    }
+
+    /// Advances position by one token and returns the consumed token.
+    inline fn advance(self: *Parser) ?Token {
         if (self.pos >= self.tokens.len) return null;
+        defer self.pos += 1;
         return self.tokens[self.pos];
     }
 
-    fn advance(self: *Parser) ?Token {
-        if (self.pos >= self.tokens.len) return null;
-        const tok = self.tokens[self.pos];
-        self.pos += 1;
-        return tok;
-    }
+    // =========================================================================
+    // Token type predicates
+    // =========================================================================
 
-    fn isOp(self: *Parser, op: []const u8) bool {
+    /// Returns true if current token is the specified operator.
+    fn isOperator(self: *const Parser, op: []const u8) bool {
         const tok = self.peek() orelse return false;
-        switch (tok.kind) {
-            .operator => |t| return std.mem.eql(u8, t, op),
-            .word => |segs| {
-                // Check for keyword words (like 'if', 'else', 'end', 'fun', 'and', 'or')
-                // These are lexed as words but should be treated as keywords in command position
-                if (segs.len == 1 and segs[0].quotes == .none and token_types.isKeyword(segs[0].text)) {
-                    return std.mem.eql(u8, segs[0].text, op);
-                }
-                return false;
-            },
-            .separator => return false,
-        }
+        return tok.kind == .operator and std.mem.eql(u8, tok.kind.operator, op);
     }
 
-    fn isSep(self: *Parser) bool {
-        if (self.peek()) |tok| {
-            return tok.kind == .separator;
-        }
-        return false;
+    /// Returns true if current token is an unquoted bare word matching the given keyword.
+    fn isKeyword(self: *const Parser, keyword: []const u8) bool {
+        const tok = self.peek() orelse return false;
+        if (tok.kind != .word) return false;
+        const segs = tok.kind.word;
+        return segs.len == 1 and segs[0].quotes == .none and std.mem.eql(u8, segs[0].text, keyword);
     }
 
-    fn isWord(self: *Parser) bool {
-        if (self.peek()) |tok| {
-            return tok.kind == .word;
-        }
-        return false;
+    /// Returns true if current token matches the specified operator or keyword.
+    /// Used for checking keywords that can appear in command position (if, for, while, etc.).
+    fn isOp(self: *const Parser, op: []const u8) bool {
+        return self.isOperator(op) or (token_types.isKeyword(op) and self.isKeyword(op));
     }
 
+    /// Returns true if current token is a separator (newline or semicolon).
+    fn isSep(self: *const Parser) bool {
+        const tok = self.peek() orelse return false;
+        return tok.kind == .separator;
+    }
+
+    /// Returns true if current token is a word.
+    fn isWord(self: *const Parser) bool {
+        const tok = self.peek() orelse return false;
+        return tok.kind == .word;
+    }
+
+    /// Returns true if current word token is a logical operator keyword (and, or).
+    fn isLogicalKeyword(self: *const Parser) bool {
+        const tok = self.peek() orelse return false;
+        if (tok.kind != .word) return false;
+        const parts = tok.kind.word;
+        return parts.len == 1 and parts[0].quotes == .none and token_types.isLogicalOperator(parts[0].text);
+    }
+
+    /// Returns true if current token starts a block (if, for, while, fun).
+    fn isBlockStart(self: *const Parser) bool {
+        return self.isOp("if") or self.isOp("for") or self.isOp("while") or self.isOp("fun");
+    }
+
+    // =========================================================================
+    // Separator handling
+    // =========================================================================
+
+    /// Skips any consecutive separator tokens.
     fn skipSeps(self: *Parser) void {
         while (self.isSep()) {
             _ = self.advance();
         }
     }
 
-    fn parseEnvPrefix(word_parts: []const WordPart) ?struct { key: []const u8, value: []const u8 } {
-        if (word_parts.len != 1) return null;
-        if (word_parts[0].quotes != .none) return null;
+    // =========================================================================
+    // Word analysis helpers
+    // =========================================================================
+
+    /// Result of parsing an environment variable assignment.
+    const EnvAssignment = struct { key: []const u8, value: []const u8 };
+
+    /// Attempts to parse a word as an environment variable assignment (KEY=value).
+    /// Returns the key-value pair if valid, null otherwise.
+    fn tryParseEnvAssignment(word_parts: []const WordPart) ?EnvAssignment {
+        // Only unquoted single-segment words can be assignments
+        if (word_parts.len != 1 or word_parts[0].quotes != .none) return null;
 
         const text = word_parts[0].text;
         const eq_pos = std.mem.indexOf(u8, text, "=") orelse return null;
+        if (eq_pos == 0) return null; // Empty key
 
-        if (eq_pos == 0) return null;
         const key = text[0..eq_pos];
 
+        // Validate identifier: must start with alpha/underscore, continue with alphanumeric/underscore
         if (!token_types.isIdentStart(key[0])) return null;
         for (key[1..]) |c| {
             if (!token_types.isIdentChar(c)) return null;
@@ -137,6 +175,43 @@ pub const Parser = struct {
         return .{ .key = key, .value = text[eq_pos + 1 ..] };
     }
 
+    /// Attempts to parse a logical operator (&&, ||, and, or) at current position.
+    /// Returns the operator type if found, null otherwise.
+    fn tryParseLogicalOp(self: *const Parser) ?ChainOperator {
+        const tok = self.peek() orelse return null;
+
+        switch (tok.kind) {
+            .operator => |t| {
+                if (!token_types.isLogicalOperator(t)) return null;
+                return if (std.mem.eql(u8, t, "&&")) .@"and" else .@"or";
+            },
+            .word => |segs| {
+                if (segs.len != 1 or segs[0].quotes != .none) return null;
+                if (!token_types.isLogicalOperator(segs[0].text)) return null;
+                return if (std.mem.eql(u8, segs[0].text, "and")) .@"and" else .@"or";
+            },
+            .separator => return null,
+        }
+    }
+
+    // =========================================================================
+    // Redirect parsing
+    // =========================================================================
+
+    /// Determines the source file descriptor from a redirect operator.
+    /// - Operators starting with '2' redirect stderr (fd 2)
+    /// - Input redirects '<' target stdin (fd 0)
+    /// - All other redirects target stdout (fd 1)
+    fn getRedirectFd(op_text: []const u8) u8 {
+        if (op_text.len == 0) return 1;
+        return switch (op_text[0]) {
+            '2' => 2,
+            '<' => 0,
+            else => 1,
+        };
+    }
+
+    /// Parses a redirect operator and its target. Returns null if no redirect present.
     fn parseRedirect(self: *Parser) ParseError!?Redirect {
         const tok = self.peek() orelse return null;
         if (tok.kind != .operator) return null;
@@ -145,92 +220,98 @@ pub const Parser = struct {
         if (!token_types.isRedirectOperator(op_text)) return null;
 
         _ = self.advance();
+        const fd = getRedirectFd(op_text);
 
-        const fd: u8 = if (op_text.len > 0 and op_text[0] == '2')
-            2
-        else if (op_text.len > 0 and op_text[0] == '<')
-            0
-        else
-            1;
-
+        // Handle fd duplication (2>&1)
         if (std.mem.eql(u8, op_text, "2>&1")) {
             return Redirect{ .from_fd = fd, .kind = .{ .dup = 1 } };
         }
 
+        // All other redirects need a target word
         if (!self.isWord()) return ParseError.UnexpectedEOF;
-
         const word_tok = self.advance().?;
         const parts = word_tok.kind.word;
 
-        const kind = if (op_text.len > 0 and op_text[0] == '<')
-            RedirectKind{ .read = parts }
+        const kind: RedirectKind = if (op_text[0] == '<')
+            .{ .read = parts }
         else if (std.mem.endsWith(u8, op_text, ">>"))
-            RedirectKind{ .write_append = parts }
+            .{ .write_append = parts }
         else
-            RedirectKind{ .write_truncate = parts };
+            .{ .write_truncate = parts };
 
         return Redirect{ .from_fd = fd, .kind = kind };
     }
 
-    /// Check if the current word token is a logical operator keyword (and, or)
-    fn isLogicalKeyword(self: *Parser) bool {
-        const tok = self.peek() orelse return false;
-        if (tok.kind != .word) return false;
+    // =========================================================================
+    // Command parsing
+    // =========================================================================
 
-        const parts = tok.kind.word;
-        return parts.len == 1 and parts[0].quotes == .none and token_types.isLogicalOperator(parts[0].text);
-    }
-
-    fn parseCommand(self: *Parser) ParseError!?Command {
-        var assignments: std.ArrayListUnmanaged(Assignment) = .empty;
-        var words: std.ArrayListUnmanaged([]const WordPart) = .empty;
-        var redirects: std.ArrayListUnmanaged(Redirect) = .empty;
-
+    /// Parses leading environment variable assignments (KEY=value format).
+    fn parseAssignments(self: *Parser, assignments: *std.ArrayListUnmanaged(Assignment)) ParseError!void {
         while (self.isWord() and !self.isLogicalKeyword()) {
             const tok = self.peek().?;
-            const segs = tok.kind.word;
-            if (parseEnvPrefix(segs)) |parsed| {
-                _ = self.advance();
-                const value_seg = self.allocator.alloc(WordPart, 1) catch return ParseError.OutOfMemory;
-                value_seg[0] = .{ .quotes = .none, .text = parsed.value };
-                assignments.append(self.allocator, .{ .key = parsed.key, .value = value_seg }) catch return ParseError.OutOfMemory;
-            } else {
-                break;
-            }
-        }
+            const parsed = tryParseEnvAssignment(tok.kind.word) orelse break;
 
+            _ = self.advance();
+            const value_seg = self.allocator.alloc(WordPart, 1) catch return ParseError.OutOfMemory;
+            value_seg[0] = .{ .quotes = .none, .text = parsed.value };
+            try assignments.append(self.allocator, .{ .key = parsed.key, .value = value_seg });
+        }
+    }
+
+    /// Parses command words and redirections.
+    fn parseWordsAndRedirects(
+        self: *Parser,
+        words: *std.ArrayListUnmanaged([]const WordPart),
+        redirects: *std.ArrayListUnmanaged(Redirect),
+    ) ParseError!void {
         while (true) {
             if (try self.parseRedirect()) |redirect| {
-                redirects.append(self.allocator, redirect) catch return ParseError.OutOfMemory;
+                try redirects.append(self.allocator, redirect);
                 continue;
             }
 
             // Stop at logical keywords (and, or) - they belong to parseLogical
             if (self.isWord() and !self.isLogicalKeyword()) {
                 const tok = self.advance().?;
-                words.append(self.allocator, tok.kind.word) catch return ParseError.OutOfMemory;
+                try words.append(self.allocator, tok.kind.word);
                 continue;
             }
 
             break;
         }
+    }
+
+    /// Parses a single command with optional assignments, words, and redirects.
+    fn parseCommand(self: *Parser) ParseError!?Command {
+        var assignments: std.ArrayListUnmanaged(Assignment) = .empty;
+        var words: std.ArrayListUnmanaged([]const WordPart) = .empty;
+        var redirects: std.ArrayListUnmanaged(Redirect) = .empty;
+
+        try self.parseAssignments(&assignments);
+        try self.parseWordsAndRedirects(&words, &redirects);
 
         if (words.items.len == 0 and assignments.items.len == 0) {
             return null;
         }
 
         return Command{
-            .assignments = assignments.toOwnedSlice(self.allocator) catch return ParseError.OutOfMemory,
-            .words = words.toOwnedSlice(self.allocator) catch return ParseError.OutOfMemory,
-            .redirects = redirects.toOwnedSlice(self.allocator) catch return ParseError.OutOfMemory,
+            .assignments = try assignments.toOwnedSlice(self.allocator),
+            .words = try words.toOwnedSlice(self.allocator),
+            .redirects = try redirects.toOwnedSlice(self.allocator),
         };
     }
 
+    // =========================================================================
+    // Pipeline and logical chain parsing
+    // =========================================================================
+
+    /// Parses a pipeline of commands connected by `|`.
     fn parsePipeline(self: *Parser) ParseError!?Pipeline {
         var commands: std.ArrayListUnmanaged(Command) = .empty;
 
         const first_cmd = try self.parseCommand() orelse return null;
-        commands.append(self.allocator, first_cmd) catch return ParseError.OutOfMemory;
+        try commands.append(self.allocator, first_cmd);
 
         while (true) {
             const tok = self.peek() orelse break;
@@ -240,108 +321,277 @@ pub const Parser = struct {
             _ = self.advance();
             self.skipSeps();
             const cmd = try self.parseCommand() orelse return ParseError.UnexpectedEOF;
-            commands.append(self.allocator, cmd) catch return ParseError.OutOfMemory;
+            try commands.append(self.allocator, cmd);
         }
 
         return Pipeline{
-            .commands = commands.toOwnedSlice(self.allocator) catch return ParseError.OutOfMemory,
+            .commands = try commands.toOwnedSlice(self.allocator),
         };
     }
 
+    /// Parses a logical chain of pipelines connected by `&&`, `||`, `and`, or `or`.
     fn parseLogical(self: *Parser) ParseError!?[]ChainItem {
         var chains: std.ArrayListUnmanaged(ChainItem) = .empty;
 
         const first_pipeline = try self.parsePipeline() orelse return null;
-        chains.append(self.allocator, .{ .op = .none, .pipeline = first_pipeline }) catch return ParseError.OutOfMemory;
+        try chains.append(self.allocator, .{ .op = .none, .pipeline = first_pipeline });
 
-        while (true) {
-            // Check for logical operators: &&, ||, and, or
-            // These can be either op tokens (&&, ||) or word tokens (and, or)
-            var op_value: ChainOperator = .none;
-            var has_op = false;
-
-            if (self.peek()) |tok| {
-                switch (tok.kind) {
-                    .operator => |t| {
-                        if (token_types.isLogicalOperator(t)) {
-                            op_value = if (std.mem.eql(u8, t, "&&")) .@"and" else .@"or";
-                            has_op = true;
-                        }
-                    },
-                    .word => |segs| {
-                        // Check if it's a text operator keyword (and, or)
-                        if (segs.len == 1 and segs[0].quotes == .none) {
-                            if (token_types.isLogicalOperator(segs[0].text)) {
-                                op_value = if (std.mem.eql(u8, segs[0].text, "and")) .@"and" else .@"or";
-                                has_op = true;
-                            }
-                        }
-                    },
-                    .separator => {},
-                }
-            }
-
-            if (has_op) {
-                _ = self.advance();
-                self.skipSeps();
-                const pipeline = try self.parsePipeline() orelse return ParseError.UnexpectedEOF;
-                chains.append(self.allocator, .{ .op = op_value, .pipeline = pipeline }) catch return ParseError.OutOfMemory;
-            } else {
-                break;
-            }
+        while (self.tryParseLogicalOp()) |op| {
+            _ = self.advance();
+            self.skipSeps();
+            const pipeline = try self.parsePipeline() orelse return ParseError.UnexpectedEOF;
+            try chains.append(self.allocator, .{ .op = op, .pipeline = pipeline });
         }
 
-        return chains.toOwnedSlice(self.allocator) catch return ParseError.OutOfMemory;
+        return try chains.toOwnedSlice(self.allocator);
     }
 
+    // =========================================================================
+    // Block scanning helpers
+    // =========================================================================
+
+    /// Scans forward to find a block terminator, handling nested blocks.
+    /// Returns the position of the terminator, leaving the parser AT the terminator (not past it).
+    ///
+    /// `terminators` specifies which keywords (besides "end" at depth 0) can end the scan.
+    /// For example, parseIfBranch passes &.{"else"} to stop at "else" at depth 1.
+    fn scanToBlockEnd(self: *Parser, terminators: []const []const u8) ?usize {
+        var depth: usize = 1;
+
+        while (self.pos < self.tokens.len) {
+            if (self.isBlockStart()) {
+                depth += 1;
+                _ = self.advance();
+            } else if (self.isOp("end")) {
+                depth -= 1;
+                if (depth == 0) return self.pos;
+                _ = self.advance();
+            } else {
+                // Check custom terminators at depth 1
+                if (depth == 1) {
+                    for (terminators) |term| {
+                        if (self.isOp(term)) return self.pos;
+                    }
+                }
+                _ = self.advance();
+            }
+        }
+        return null;
+    }
+
+    // =========================================================================
+    // Source extraction utilities
+    // =========================================================================
+
+    /// Extracts source text between two token positions.
+    /// Returns empty string if positions are invalid or input is unavailable.
+    fn extractSourceRange(self: *const Parser, start_pos: usize, end_pos: usize) []const u8 {
+        if (self.input.len == 0) return "";
+        if (start_pos >= end_pos or start_pos >= self.tokens.len) return "";
+
+        const start_byte = self.tokens[start_pos].span.start;
+        const end_byte = if (end_pos < self.tokens.len)
+            self.tokens[end_pos].span.start
+        else
+            self.input.len;
+
+        if (start_byte >= end_byte) return "";
+
+        return self.input[start_byte..@min(end_byte, self.input.len)];
+    }
+
+    /// Captures source text from current position until a block terminator.
+    /// Returns the trimmed body text with parser positioned at the terminator.
+    fn captureBlockBody(self: *Parser, terminators: []const []const u8, err: ParseError) ParseError![]const u8 {
+        const body_start = self.pos;
+        const end_pos = self.scanToBlockEnd(terminators) orelse return err;
+        return std.mem.trim(u8, self.extractSourceRange(body_start, end_pos), " \t\n");
+    }
+
+    /// Captures condition source (tokens until separator or terminators).
+    /// Advances past the condition and skips trailing separators.
+    fn captureCondition(self: *Parser, terminators: []const []const u8) []const u8 {
+        const start = self.pos;
+        while (self.pos < self.tokens.len and !self.isSep()) {
+            for (terminators) |term| {
+                if (self.isOp(term)) {
+                    const result = self.extractSourceRange(start, self.pos);
+                    return std.mem.trim(u8, result, " \t\n");
+                }
+            }
+            _ = self.advance();
+        }
+        const result = self.extractSourceRange(start, self.pos);
+        self.skipSeps();
+        return std.mem.trim(u8, result, " \t\n");
+    }
+
+    // =========================================================================
+    // Control flow statement parsing
+    // =========================================================================
+
+    /// Parses a function definition: `fun name ... end`
+    fn parseFunctionDefinition(self: *Parser) ParseError!Statement {
+        _ = self.advance(); // consume 'fun'
+        self.skipSeps();
+
+        // Expect function name (a word)
+        if (!self.isWord()) return ParseError.InvalidFunctionName;
+
+        const name_tok = self.advance().?;
+        const name = blk: {
+            const segs = name_tok.kind.word;
+            if (segs.len == 1 and segs[0].quotes == .none) {
+                break :blk segs[0].text;
+            }
+            return ParseError.InvalidFunctionName;
+        };
+
+        self.skipSeps();
+
+        const body = try self.captureBlockBody(&.{}, ParseError.UnterminatedFunction);
+        _ = self.advance(); // consume 'end'
+
+        return Statement{ .kind = .{ .function = FunctionDefinition{ .name = name, .body = body } } };
+    }
+
+    /// Parses an if statement with optional else-if chains:
+    ///   `if cond1; body1; else if cond2; body2; else; body3; end`
+    fn parseIfStatement(self: *Parser) ParseError!Statement {
+        var branches: std.ArrayListUnmanaged(IfBranch) = .empty;
+
+        _ = self.advance(); // consume 'if'
+        const first_branch = try self.parseIfBranch();
+        try branches.append(self.allocator, first_branch);
+
+        // Parse else-if chains and final else
+        var else_body: ?[]const u8 = null;
+
+        while (self.pos < self.tokens.len) {
+            if (self.isOp("else")) {
+                _ = self.advance(); // consume 'else'
+                self.skipSeps();
+
+                if (self.isOp("if")) {
+                    // else if - parse another branch
+                    _ = self.advance(); // consume 'if'
+                    const branch = try self.parseIfBranch();
+                    try branches.append(self.allocator, branch);
+                } else {
+                    // Final else - capture body until end
+                    else_body = try self.captureBlockBody(&.{}, ParseError.UnterminatedIf);
+                    _ = self.advance(); // consume 'end'
+                    break;
+                }
+            } else if (self.isOp("end")) {
+                _ = self.advance(); // consume 'end'
+                break;
+            } else {
+                return ParseError.UnterminatedIf;
+            }
+        }
+
+        return Statement{ .kind = .{ .@"if" = IfStatement{
+            .branches = try branches.toOwnedSlice(self.allocator),
+            .else_body = else_body,
+        } } };
+    }
+
+    /// Parses a single if/else-if branch (condition + body).
+    /// Expects parser to be positioned after 'if' keyword.
+    fn parseIfBranch(self: *Parser) ParseError!IfBranch {
+        self.skipSeps();
+
+        const condition = self.captureCondition(&.{ "end", "else" });
+        const body = try self.captureBlockBody(&.{"else"}, ParseError.UnterminatedIf);
+
+        return IfBranch{ .condition = condition, .body = body };
+    }
+
+    /// Parses a for loop: `for var in items... end`
+    fn parseForStatement(self: *Parser) ParseError!Statement {
+        _ = self.advance(); // consume 'for'
+        self.skipSeps();
+
+        // Parse variable name
+        if (!self.isWord()) return ParseError.InvalidForLoop;
+        const var_tok = self.advance().?;
+        const variable = blk: {
+            const segs = var_tok.kind.word;
+            if (segs.len == 1 and segs[0].quotes == .none) {
+                break :blk segs[0].text;
+            }
+            return ParseError.InvalidForLoop;
+        };
+
+        self.skipSeps();
+
+        // Expect 'in' keyword
+        if (!self.isOp("in")) return ParseError.InvalidForLoop;
+        _ = self.advance(); // consume 'in'
+        self.skipSeps();
+
+        // Items: everything until separator (newline or semicolon)
+        const items_source = self.captureCondition(&.{"end"});
+        const body = try self.captureBlockBody(&.{}, ParseError.UnterminatedFor);
+        _ = self.advance(); // consume 'end'
+
+        return Statement{ .kind = .{ .@"for" = ForStatement{
+            .variable = variable,
+            .items_source = items_source,
+            .body = body,
+        } } };
+    }
+
+    /// Parses a while loop: `while condition ... end`
+    fn parseWhileStatement(self: *Parser) ParseError!Statement {
+        _ = self.advance(); // consume 'while'
+        self.skipSeps();
+
+        const condition = self.captureCondition(&.{"end"});
+        const body = try self.captureBlockBody(&.{}, ParseError.UnterminatedWhile);
+        _ = self.advance(); // consume 'end'
+
+        return Statement{ .kind = .{ .@"while" = WhileStatement{
+            .condition = condition,
+            .body = body,
+        } } };
+    }
+
+    // =========================================================================
+    // Statement parsing
+    // =========================================================================
+
+    /// Parses a single statement (command, control flow, or function definition).
     fn parseStmt(self: *Parser) ParseError!?Statement {
-        // Check for function definition: fun name ... end
-        if (self.isOp("fun")) {
-            return try self.parseFunctionDefinition();
-        }
+        // Control flow and function definitions
+        if (self.isOp("fun")) return try self.parseFunctionDefinition();
+        if (self.isOp("if")) return try self.parseIfStatement();
+        if (self.isOp("for")) return try self.parseForStatement();
+        if (self.isOp("while")) return try self.parseWhileStatement();
 
-        // Check for if statement: if condition ... end
-        if (self.isOp("if")) {
-            return try self.parseIfStatement();
-        }
-
-        // Check for for loop: for var in items... end
-        if (self.isOp("for")) {
-            return try self.parseForStatement();
-        }
-
-        // Check for while loop: while condition ... end
-        if (self.isOp("while")) {
-            return try self.parseWhileStatement();
-        }
-
-        // Check for break statement
+        // Simple statements
         if (self.isOp("break")) {
             _ = self.advance();
             return Statement{ .kind = .@"break" };
         }
-
-        // Check for continue statement
         if (self.isOp("continue")) {
             _ = self.advance();
             return Statement{ .kind = .@"continue" };
         }
-
-        // Check for return statement: return [value]
         if (self.isOp("return")) {
             _ = self.advance();
-            // Check for optional status argument (can be variable, literal, etc.)
-            var status_parts: ?[]const WordPart = null;
-            if (self.isWord()) {
+            // Check for optional status argument
+            const status_parts: ?[]const WordPart = if (self.isWord()) blk: {
                 const tok = self.peek().?;
-                status_parts = tok.kind.word;
                 _ = self.advance();
-            }
+                break :blk tok.kind.word;
+            } else null;
             return Statement{ .kind = .{ .@"return" = status_parts } };
         }
 
+        // Command statement
         const chains = try self.parseLogical() orelse return null;
-
         var background = false;
         var capture: ?Capture = null;
 
@@ -367,257 +617,18 @@ pub const Parser = struct {
             }
         }
 
-        return Statement{ .kind = .{ .command = CommandStatement{ .background = background, .capture = capture, .chains = chains } } };
-    }
-
-    /// Parse a function definition: fun name ... end
-    fn parseFunctionDefinition(self: *Parser) ParseError!Statement {
-        _ = self.advance(); // consume 'fun'
-        self.skipSeps();
-
-        // Expect function name (a word)
-        if (!self.isWord()) return ParseError.InvalidFunctionName;
-
-        const name_tok = self.advance().?;
-        const name = blk: {
-            const segs = name_tok.kind.word;
-            if (segs.len == 1 and segs[0].quotes == .none) {
-                break :blk segs[0].text;
-            }
-            return ParseError.InvalidFunctionName;
-        };
-
-        self.skipSeps();
-
-        // Capture the body: everything until we see 'end'
-        const body_start_pos = self.pos;
-        const scan = self.scanToBlockEnd(&.{}) orelse return ParseError.UnterminatedFunction;
-        const body = std.mem.trim(u8, self.extractSourceRange(body_start_pos, scan.end_pos), " \t\n");
-        _ = self.advance(); // consume 'end'
-
-        return Statement{ .kind = .{ .function = FunctionDefinition{ .name = name, .body = body } } };
-    }
-
-    /// Parse an if statement with optional else-if chains:
-    ///   if cond1; body1; else if cond2; body2; else; body3; end
-    /// Condition is everything until first separator (newline or semicolon)
-    fn parseIfStatement(self: *Parser) ParseError!Statement {
-        var branches: std.ArrayListUnmanaged(IfBranch) = .empty;
-
-        // Parse the initial "if" branch
-        _ = self.advance(); // consume 'if'
-        const first_branch = try self.parseIfBranch();
-        branches.append(self.allocator, first_branch) catch return ParseError.OutOfMemory;
-
-        // Parse else-if chains and final else
-        var else_body: ?[]const u8 = null;
-
-        while (self.pos < self.tokens.len) {
-            if (self.isOp("else")) {
-                _ = self.advance(); // consume 'else'
-                self.skipSeps();
-
-                if (self.isOp("if")) {
-                    // else if - parse another branch
-                    _ = self.advance(); // consume 'if'
-                    const branch = try self.parseIfBranch();
-                    branches.append(self.allocator, branch) catch return ParseError.OutOfMemory;
-                } else {
-                    // Final else - capture body until end
-                    const else_start = self.pos;
-                    const scan = self.scanToBlockEnd(&.{}) orelse return ParseError.UnterminatedIf;
-                    else_body = std.mem.trim(u8, self.extractSourceRange(else_start, scan.end_pos), " \t\n");
-                    _ = self.advance(); // consume 'end'
-                    break;
-                }
-            } else if (self.isOp("end")) {
-                _ = self.advance(); // consume 'end'
-                break;
-            } else {
-                return ParseError.UnterminatedIf;
-            }
-        }
-
-        return Statement{ .kind = .{ .@"if" = IfStatement{
-            .branches = branches.toOwnedSlice(self.allocator) catch return ParseError.OutOfMemory,
-            .else_body = else_body,
-        } } };
-    }
-
-    /// Parse a single if/else-if branch (condition + body)
-    /// Expects parser to be positioned after 'if' keyword
-    fn parseIfBranch(self: *Parser) ParseError!IfBranch {
-        self.skipSeps();
-
-        // Condition: parse until separator
-        const cond_start_pos = self.pos;
-        while (self.pos < self.tokens.len and !self.isSep()) {
-            if (self.isOp("end") or self.isOp("else")) break;
-            _ = self.advance();
-        }
-        const cond_end_pos = self.pos;
-        self.skipSeps();
-
-        // Body: parse until else/end at our depth
-        const body_start_pos = self.pos;
-        const scan = self.scanToBlockEnd(&.{"else"}) orelse return ParseError.UnterminatedIf;
-
-        const condition = std.mem.trim(u8, self.extractSourceRange(cond_start_pos, cond_end_pos), " \t\n");
-        const body = std.mem.trim(u8, self.extractSourceRange(body_start_pos, scan.end_pos), " \t\n");
-
-        return IfBranch{ .condition = condition, .body = body };
-    }
-
-    /// Parse a for loop: for var in items... end
-    /// Syntax: for x in a b c; echo $x; end
-    fn parseForStatement(self: *Parser) ParseError!Statement {
-        _ = self.advance(); // consume 'for'
-        self.skipSeps();
-
-        // Parse variable name
-        if (!self.isWord()) return ParseError.InvalidForLoop;
-        const var_tok = self.advance().?;
-        const variable = blk: {
-            const segs = var_tok.kind.word;
-            if (segs.len == 1 and segs[0].quotes == .none) {
-                break :blk segs[0].text;
-            }
-            return ParseError.InvalidForLoop;
-        };
-
-        self.skipSeps();
-
-        // Expect 'in' keyword
-        if (!self.isOp("in")) return ParseError.InvalidForLoop;
-        _ = self.advance(); // consume 'in'
-        self.skipSeps();
-
-        // Items: everything until separator (newline or semicolon)
-        const items_start_pos = self.pos;
-        while (self.pos < self.tokens.len and !self.isSep()) {
-            if (self.isOp("end")) break;
-            _ = self.advance();
-        }
-        const items_end_pos = self.pos;
-
-        self.skipSeps();
-
-        // Body: find 'end', tracking depth for nested for/if statements
-        const body_start_pos = self.pos;
-        const scan = self.scanToBlockEnd(&.{}) orelse return ParseError.UnterminatedFor;
-        const items_source = std.mem.trim(u8, self.extractSourceRange(items_start_pos, items_end_pos), " \t\n");
-        const body = std.mem.trim(u8, self.extractSourceRange(body_start_pos, scan.end_pos), " \t\n");
-        _ = self.advance(); // consume 'end'
-
-        return Statement{ .kind = .{ .@"for" = ForStatement{
-            .variable = variable,
-            .items_source = items_source,
-            .body = body,
-        } } };
-    }
-
-    /// Parse a while loop: while condition ... end
-    /// Syntax: while test -f file; echo waiting; sleep 1; end
-    fn parseWhileStatement(self: *Parser) ParseError!Statement {
-        _ = self.advance(); // consume 'while'
-        self.skipSeps();
-
-        // Condition: parse until separator (newline or semicolon)
-        const cond_start_pos = self.pos;
-        while (self.pos < self.tokens.len and !self.isSep()) {
-            if (self.isOp("end")) break;
-            _ = self.advance();
-        }
-        const cond_end_pos = self.pos;
-
-        self.skipSeps();
-
-        // Body: find 'end', tracking depth for nested blocks
-        const body_start_pos = self.pos;
-        const scan = self.scanToBlockEnd(&.{}) orelse return ParseError.UnterminatedWhile;
-        const condition = std.mem.trim(u8, self.extractSourceRange(cond_start_pos, cond_end_pos), " \t\n");
-        const body = std.mem.trim(u8, self.extractSourceRange(body_start_pos, scan.end_pos), " \t\n");
-        _ = self.advance(); // consume 'end'
-
-        return Statement{ .kind = .{ .@"while" = WhileStatement{
-            .condition = condition,
-            .body = body,
+        return Statement{ .kind = .{ .command = CommandStatement{
+            .background = background,
+            .capture = capture,
+            .chains = chains,
         } } };
     }
 
     // =========================================================================
-    // Block Scanning Helpers
+    // Main parsing entry point
     // =========================================================================
 
-    /// Check if current token starts a block (if, for, while, fun)
-    fn isBlockStart(self: *Parser) bool {
-        return self.isOp("if") or self.isOp("for") or self.isOp("while") or self.isOp("fun");
-    }
-
-    /// Result of scanning to a block terminator
-    const ScanResult = struct {
-        /// Position of the terminating token (end, else, etc.)
-        end_pos: usize,
-        /// Which terminator was found
-        terminator: []const u8,
-    };
-
-    /// Scan forward to find a block terminator, handling nested blocks.
-    /// Returns the position of the terminator and which one was found.
-    /// The parser position is left AT the terminator (not past it).
-    ///
-    /// `terminators` specifies which keywords (besides "end" at depth 0) can end the scan.
-    /// For example, parseIfBranch passes &.{"else"} to stop at "else" at depth 1.
-    fn scanToBlockEnd(self: *Parser, terminators: []const []const u8) ?ScanResult {
-        var depth: usize = 1;
-
-        while (self.pos < self.tokens.len) {
-            if (self.isBlockStart()) {
-                depth += 1;
-                _ = self.advance();
-            } else if (self.isOp("end")) {
-                depth -= 1;
-                if (depth == 0) {
-                    return .{ .end_pos = self.pos, .terminator = "end" };
-                }
-                _ = self.advance();
-            } else {
-                // Check custom terminators at depth 1
-                if (depth == 1) {
-                    for (terminators) |term| {
-                        if (self.isOp(term)) {
-                            return .{ .end_pos = self.pos, .terminator = term };
-                        }
-                    }
-                }
-                _ = self.advance();
-            }
-        }
-        return null;
-    }
-
-    /// Extract source text between two token positions
-    fn extractSourceRange(self: *Parser, start_pos: usize, end_pos: usize) []const u8 {
-        if (self.input.len == 0 or start_pos >= end_pos or start_pos >= self.tokens.len) {
-            return "";
-        }
-
-        const start_span = self.tokens[start_pos].span;
-        const end_span = if (end_pos < self.tokens.len)
-            self.tokens[end_pos].span
-        else
-            TokenSpan{ .start = self.input.len, .end = self.input.len };
-
-        const start_byte = start_span.start;
-        const end_byte = end_span.start;
-
-        if (start_byte >= end_byte or end_byte > self.input.len) {
-            return "";
-        }
-
-        return self.input[start_byte..end_byte];
-    }
-
+    /// Parses the token stream into a Program AST.
     pub fn parse(self: *Parser) ParseError!Program {
         var stmts: std.ArrayListUnmanaged(Statement) = .empty;
 
@@ -628,7 +639,7 @@ pub const Parser = struct {
             if (self.pos >= self.tokens.len) break;
 
             if (try self.parseStmt()) |stmt| {
-                stmts.append(self.allocator, stmt) catch return ParseError.OutOfMemory;
+                try stmts.append(self.allocator, stmt);
             } else {
                 break;
             }
@@ -644,7 +655,7 @@ pub const Parser = struct {
             }
         }
 
-        return Program{ .statements = stmts.toOwnedSlice(self.allocator) catch return ParseError.OutOfMemory };
+        return Program{ .statements = try stmts.toOwnedSlice(self.allocator) };
     }
 };
 
@@ -655,16 +666,29 @@ pub const Parser = struct {
 const testing = std.testing;
 const lexer = @import("lexer.zig");
 
-test "simple command" {
+/// Tokenizes and parses input, returning the parsed program.
+fn parseTest(arena: *std.heap.ArenaAllocator, input: []const u8) !Program {
+    const allocator = arena.allocator();
+    var lex = lexer.Lexer.init(allocator, input);
+    const tokens = try lex.tokenize();
+    var p = Parser.initWithInput(allocator, tokens, input);
+    return try p.parse();
+}
+
+/// Tokenizes and parses input without source (for tests that don't need body extraction).
+fn parseTestNoSource(arena: *std.heap.ArenaAllocator, input: []const u8) !Program {
+    const allocator = arena.allocator();
+    var lex = lexer.Lexer.init(allocator, input);
+    const tokens = try lex.tokenize();
+    var p = Parser.init(allocator, tokens);
+    return try p.parse();
+}
+
+test "Commands: simple command" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    const allocator = arena.allocator();
 
-    var lex = lexer.Lexer.init(allocator, "echo hello");
-    const tokens = try lex.tokenize();
-
-    var p = Parser.init(allocator, tokens);
-    const prog = try p.parse();
+    const prog = try parseTestNoSource(&arena, "echo hello");
 
     try testing.expectEqual(@as(usize, 1), prog.statements.len);
     const cmd_stmt = prog.statements[0].kind.command;
@@ -676,47 +700,32 @@ test "simple command" {
     try testing.expectEqual(@as(usize, 2), cmd_stmt.chains[0].pipeline.commands[0].words.len);
 }
 
-test "pipeline" {
+test "Commands: pipeline" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    const allocator = arena.allocator();
 
-    var lex = lexer.Lexer.init(allocator, "cat file | grep foo | wc -l");
-    const tokens = try lex.tokenize();
-
-    var p = Parser.init(allocator, tokens);
-    const prog = try p.parse();
+    const prog = try parseTestNoSource(&arena, "cat file | grep foo | wc -l");
 
     try testing.expectEqual(@as(usize, 1), prog.statements.len);
     const pipeline = prog.statements[0].kind.command.chains[0].pipeline;
     try testing.expectEqual(@as(usize, 3), pipeline.commands.len);
 }
 
-test "background" {
+test "Commands: background execution" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    const allocator = arena.allocator();
 
-    var lex = lexer.Lexer.init(allocator, "sleep 10 &");
-    const tokens = try lex.tokenize();
-
-    var p = Parser.init(allocator, tokens);
-    const prog = try p.parse();
+    const prog = try parseTestNoSource(&arena, "sleep 10 &");
 
     try testing.expectEqual(@as(usize, 1), prog.statements.len);
     try testing.expectEqual(true, prog.statements[0].kind.command.background);
 }
 
-test "capture string" {
+test "Capture: string mode (=>)" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    const allocator = arena.allocator();
 
-    var lex = lexer.Lexer.init(allocator, "whoami => user");
-    const tokens = try lex.tokenize();
-
-    var p = Parser.init(allocator, tokens);
-    const prog = try p.parse();
+    const prog = try parseTestNoSource(&arena, "whoami => user");
 
     try testing.expectEqual(@as(usize, 1), prog.statements.len);
     if (prog.statements[0].kind.command.capture) |cap| {
@@ -727,16 +736,11 @@ test "capture string" {
     }
 }
 
-test "capture lines" {
+test "Capture: lines mode (=>@)" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    const allocator = arena.allocator();
 
-    var lex = lexer.Lexer.init(allocator, "ls =>@ files");
-    const tokens = try lex.tokenize();
-
-    var p = Parser.init(allocator, tokens);
-    const prog = try p.parse();
+    const prog = try parseTestNoSource(&arena, "ls =>@ files");
 
     try testing.expectEqual(@as(usize, 1), prog.statements.len);
     if (prog.statements[0].kind.command.capture) |cap| {
@@ -747,16 +751,11 @@ test "capture lines" {
     }
 }
 
-test "logical operators" {
+test "Logical: && and || operators" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    const allocator = arena.allocator();
 
-    var lex = lexer.Lexer.init(allocator, "true && echo ok || echo fail");
-    const tokens = try lex.tokenize();
-
-    var p = Parser.init(allocator, tokens);
-    const prog = try p.parse();
+    const prog = try parseTestNoSource(&arena, "true && echo ok || echo fail");
 
     try testing.expectEqual(@as(usize, 1), prog.statements.len);
     const cmd_stmt = prog.statements[0].kind.command;
@@ -766,19 +765,16 @@ test "logical operators" {
     try testing.expectEqual(ast.ChainOperator.@"or", cmd_stmt.chains[2].op);
 }
 
-test "redirections" {
+test "Redirections: input and output" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    const allocator = arena.allocator();
 
-    var lex = lexer.Lexer.init(allocator, "cat < in.txt > out.txt");
-    const tokens = try lex.tokenize();
-
-    var p = Parser.init(allocator, tokens);
-    const prog = try p.parse();
+    const prog = try parseTestNoSource(&arena, "cat < in.txt > out.txt");
 
     const cmd = prog.statements[0].kind.command.chains[0].pipeline.commands[0];
     try testing.expectEqual(@as(usize, 2), cmd.redirects.len);
+
+    // Input redirect
     const r1 = cmd.redirects[0];
     try testing.expectEqual(@as(u8, 0), r1.from_fd);
     switch (r1.kind) {
@@ -788,6 +784,8 @@ test "redirections" {
         },
         else => return error.TestExpectedEqual,
     }
+
+    // Output redirect
     const r2 = cmd.redirects[1];
     try testing.expectEqual(@as(u8, 1), r2.from_fd);
     switch (r2.kind) {
@@ -799,33 +797,23 @@ test "redirections" {
     }
 }
 
-test "env prefix" {
+test "Assignments: environment prefix" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    const allocator = arena.allocator();
 
-    var lex = lexer.Lexer.init(allocator, "FOO=bar env");
-    const tokens = try lex.tokenize();
-
-    var p = Parser.init(allocator, tokens);
-    const prog = try p.parse();
+    const prog = try parseTestNoSource(&arena, "FOO=bar env");
 
     const cmd = prog.statements[0].kind.command.chains[0].pipeline.commands[0];
     try testing.expectEqual(@as(usize, 1), cmd.assignments.len);
     try testing.expectEqualStrings("FOO", cmd.assignments[0].key);
 }
 
-test "function definition" {
+test "Functions: basic definition" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    const allocator = arena.allocator();
 
     const input = "fun greet\n  echo hello\nend";
-    var lex = lexer.Lexer.init(allocator, input);
-    const tokens = try lex.tokenize();
-
-    var p = Parser.initWithInput(allocator, tokens, input);
-    const prog = try p.parse();
+    const prog = try parseTest(&arena, input);
 
     try testing.expectEqual(@as(usize, 1), prog.statements.len);
     const fun_def = prog.statements[0].kind.function;
@@ -833,17 +821,12 @@ test "function definition" {
     try testing.expect(std.mem.indexOf(u8, fun_def.body, "echo hello") != null);
 }
 
-test "function definition inline" {
+test "Functions: inline definition" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    const allocator = arena.allocator();
 
     const input = "fun greet echo hello end";
-    var lex = lexer.Lexer.init(allocator, input);
-    const tokens = try lex.tokenize();
-
-    var p = Parser.initWithInput(allocator, tokens, input);
-    const prog = try p.parse();
+    const prog = try parseTest(&arena, input);
 
     try testing.expectEqual(@as(usize, 1), prog.statements.len);
     const fun_def = prog.statements[0].kind.function;
@@ -851,17 +834,12 @@ test "function definition inline" {
     try testing.expect(std.mem.indexOf(u8, fun_def.body, "echo hello") != null);
 }
 
-test "nested function definitions" {
+test "Functions: nested definitions" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    const allocator = arena.allocator();
 
     const input = "fun outer\n  fun inner\n    echo inner\n  end\n  inner\nend";
-    var lex = lexer.Lexer.init(allocator, input);
-    const tokens = try lex.tokenize();
-
-    var p = Parser.initWithInput(allocator, tokens, input);
-    const prog = try p.parse();
+    const prog = try parseTest(&arena, input);
 
     try testing.expectEqual(@as(usize, 1), prog.statements.len);
     const fun_def = prog.statements[0].kind.function;
@@ -871,48 +849,36 @@ test "nested function definitions" {
     try testing.expect(std.mem.indexOf(u8, fun_def.body, "end") != null);
 }
 
-test "unterminated function error" {
+test "Functions: unterminated error" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    const allocator = arena.allocator();
 
     const input = "fun greet\n  echo hello";
-    var lex = lexer.Lexer.init(allocator, input);
+    var lex = lexer.Lexer.init(arena.allocator(), input);
     const tokens = try lex.tokenize();
+    var p = Parser.initWithInput(arena.allocator(), tokens, input);
 
-    var p = Parser.initWithInput(allocator, tokens, input);
-    const result = p.parse();
-
-    try testing.expectError(ParseError.UnterminatedFunction, result);
+    try testing.expectError(ParseError.UnterminatedFunction, p.parse());
 }
 
-test "invalid function name error" {
+test "Functions: invalid name error" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    const allocator = arena.allocator();
 
-    // fun with a quoted name (invalid)
     const input = "fun \"quoted\" body end";
-    var lex = lexer.Lexer.init(allocator, input);
+    var lex = lexer.Lexer.init(arena.allocator(), input);
     const tokens = try lex.tokenize();
+    var p = Parser.initWithInput(arena.allocator(), tokens, input);
 
-    var p = Parser.initWithInput(allocator, tokens, input);
-    const result = p.parse();
-
-    try testing.expectError(ParseError.InvalidFunctionName, result);
+    try testing.expectError(ParseError.InvalidFunctionName, p.parse());
 }
 
-test "if statement simple" {
+test "If: simple statement" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    const allocator = arena.allocator();
 
     const input = "if true\n  echo yes\nend";
-    var lex = lexer.Lexer.init(allocator, input);
-    const tokens = try lex.tokenize();
-
-    var p = Parser.initWithInput(allocator, tokens, input);
-    const prog = try p.parse();
+    const prog = try parseTest(&arena, input);
 
     try testing.expectEqual(@as(usize, 1), prog.statements.len);
     const @"if" = prog.statements[0].kind.@"if";
@@ -922,17 +888,12 @@ test "if statement simple" {
     try testing.expectEqual(@as(?[]const u8, null), @"if".else_body);
 }
 
-test "if statement with else" {
+test "If: with else" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    const allocator = arena.allocator();
 
     const input = "if false\n  echo no\nelse\n  echo yes\nend";
-    var lex = lexer.Lexer.init(allocator, input);
-    const tokens = try lex.tokenize();
-
-    var p = Parser.initWithInput(allocator, tokens, input);
-    const prog = try p.parse();
+    const prog = try parseTest(&arena, input);
 
     try testing.expectEqual(@as(usize, 1), prog.statements.len);
     const @"if" = prog.statements[0].kind.@"if";
@@ -943,17 +904,12 @@ test "if statement with else" {
     try testing.expect(std.mem.indexOf(u8, @"if".else_body.?, "echo yes") != null);
 }
 
-test "if statement inline" {
+test "If: inline statement" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    const allocator = arena.allocator();
 
     const input = "if true; echo yes; end";
-    var lex = lexer.Lexer.init(allocator, input);
-    const tokens = try lex.tokenize();
-
-    var p = Parser.initWithInput(allocator, tokens, input);
-    const prog = try p.parse();
+    const prog = try parseTest(&arena, input);
 
     try testing.expectEqual(@as(usize, 1), prog.statements.len);
     const @"if" = prog.statements[0].kind.@"if";
@@ -962,17 +918,12 @@ test "if statement inline" {
     try testing.expect(std.mem.indexOf(u8, @"if".branches[0].body, "echo yes") != null);
 }
 
-test "nested if statements" {
+test "If: nested statements" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    const allocator = arena.allocator();
 
     const input = "if true\n  if false\n    echo inner\n  end\nend";
-    var lex = lexer.Lexer.init(allocator, input);
-    const tokens = try lex.tokenize();
-
-    var p = Parser.initWithInput(allocator, tokens, input);
-    const prog = try p.parse();
+    const prog = try parseTest(&arena, input);
 
     try testing.expectEqual(@as(usize, 1), prog.statements.len);
     const @"if" = prog.statements[0].kind.@"if";
@@ -983,17 +934,12 @@ test "nested if statements" {
     try testing.expect(std.mem.indexOf(u8, @"if".branches[0].body, "end") != null);
 }
 
-test "if else if else chain" {
+test "If: else-if chain" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    const allocator = arena.allocator();
 
     const input = "if test $x -eq 1\n  echo one\nelse if test $x -eq 2\n  echo two\nelse\n  echo other\nend";
-    var lex = lexer.Lexer.init(allocator, input);
-    const tokens = try lex.tokenize();
-
-    var p = Parser.initWithInput(allocator, tokens, input);
-    const prog = try p.parse();
+    const prog = try parseTest(&arena, input);
 
     try testing.expectEqual(@as(usize, 1), prog.statements.len);
     const @"if" = prog.statements[0].kind.@"if";
@@ -1006,17 +952,12 @@ test "if else if else chain" {
     try testing.expect(std.mem.indexOf(u8, @"if".else_body.?, "echo other") != null);
 }
 
-test "if else if without final else" {
+test "If: else-if without final else" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    const allocator = arena.allocator();
 
     const input = "if false; echo a; else if true; echo b; end";
-    var lex = lexer.Lexer.init(allocator, input);
-    const tokens = try lex.tokenize();
-
-    var p = Parser.initWithInput(allocator, tokens, input);
-    const prog = try p.parse();
+    const prog = try parseTest(&arena, input);
 
     try testing.expectEqual(@as(usize, 1), prog.statements.len);
     const @"if" = prog.statements[0].kind.@"if";
@@ -1024,32 +965,24 @@ test "if else if without final else" {
     try testing.expectEqual(@as(?[]const u8, null), @"if".else_body);
 }
 
-test "unterminated if error" {
+test "If: unterminated error" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    const allocator = arena.allocator();
 
     const input = "if true\n  echo yes";
-    var lex = lexer.Lexer.init(allocator, input);
+    var lex = lexer.Lexer.init(arena.allocator(), input);
     const tokens = try lex.tokenize();
+    var p = Parser.initWithInput(arena.allocator(), tokens, input);
 
-    var p = Parser.initWithInput(allocator, tokens, input);
-    const result = p.parse();
-
-    try testing.expectError(ParseError.UnterminatedIf, result);
+    try testing.expectError(ParseError.UnterminatedIf, p.parse());
 }
 
-test "while statement simple" {
+test "While: simple statement" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    const allocator = arena.allocator();
 
     const input = "while test -f file\n  sleep 1\nend";
-    var lex = lexer.Lexer.init(allocator, input);
-    const tokens = try lex.tokenize();
-
-    var p = Parser.initWithInput(allocator, tokens, input);
-    const prog = try p.parse();
+    const prog = try parseTest(&arena, input);
 
     try testing.expectEqual(@as(usize, 1), prog.statements.len);
     const while_stmt = prog.statements[0].kind.@"while";
@@ -1057,17 +990,12 @@ test "while statement simple" {
     try testing.expect(std.mem.indexOf(u8, while_stmt.body, "sleep 1") != null);
 }
 
-test "while statement inline" {
+test "While: inline statement" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    const allocator = arena.allocator();
 
     const input = "while true; echo loop; end";
-    var lex = lexer.Lexer.init(allocator, input);
-    const tokens = try lex.tokenize();
-
-    var p = Parser.initWithInput(allocator, tokens, input);
-    const prog = try p.parse();
+    const prog = try parseTest(&arena, input);
 
     try testing.expectEqual(@as(usize, 1), prog.statements.len);
     const while_stmt = prog.statements[0].kind.@"while";
@@ -1075,17 +1003,12 @@ test "while statement inline" {
     try testing.expect(std.mem.indexOf(u8, while_stmt.body, "echo loop") != null);
 }
 
-test "nested while in if" {
+test "While: nested in if" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    const allocator = arena.allocator();
 
     const input = "if true\n  while false\n    echo inner\n  end\nend";
-    var lex = lexer.Lexer.init(allocator, input);
-    const tokens = try lex.tokenize();
-
-    var p = Parser.initWithInput(allocator, tokens, input);
-    const prog = try p.parse();
+    const prog = try parseTest(&arena, input);
 
     try testing.expectEqual(@as(usize, 1), prog.statements.len);
     const @"if" = prog.statements[0].kind.@"if";
@@ -1094,81 +1017,54 @@ test "nested while in if" {
     try testing.expect(std.mem.indexOf(u8, @"if".branches[0].body, "while false") != null);
 }
 
-test "unterminated while error" {
+test "While: unterminated error" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    const allocator = arena.allocator();
 
     const input = "while true\n  echo loop";
-    var lex = lexer.Lexer.init(allocator, input);
+    var lex = lexer.Lexer.init(arena.allocator(), input);
     const tokens = try lex.tokenize();
+    var p = Parser.initWithInput(arena.allocator(), tokens, input);
 
-    var p = Parser.initWithInput(allocator, tokens, input);
-    const result = p.parse();
-
-    try testing.expectError(ParseError.UnterminatedWhile, result);
+    try testing.expectError(ParseError.UnterminatedWhile, p.parse());
 }
 
-test "break statement" {
+test "Control: break statement" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    const allocator = arena.allocator();
 
-    const input = "break";
-    var lex = lexer.Lexer.init(allocator, input);
-    const tokens = try lex.tokenize();
-
-    var p = Parser.initWithInput(allocator, tokens, input);
-    const prog = try p.parse();
+    const prog = try parseTest(&arena, "break");
 
     try testing.expectEqual(@as(usize, 1), prog.statements.len);
     try testing.expect(prog.statements[0].kind == .@"break");
 }
 
-test "continue statement" {
+test "Control: continue statement" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    const allocator = arena.allocator();
 
-    const input = "continue";
-    var lex = lexer.Lexer.init(allocator, input);
-    const tokens = try lex.tokenize();
-
-    var p = Parser.initWithInput(allocator, tokens, input);
-    const prog = try p.parse();
+    const prog = try parseTest(&arena, "continue");
 
     try testing.expectEqual(@as(usize, 1), prog.statements.len);
     try testing.expect(prog.statements[0].kind == .@"continue");
 }
 
-test "return statement without argument" {
+test "Return: without argument" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    const allocator = arena.allocator();
 
-    const input = "return";
-    var lex = lexer.Lexer.init(allocator, input);
-    const tokens = try lex.tokenize();
-
-    var p = Parser.initWithInput(allocator, tokens, input);
-    const prog = try p.parse();
+    const prog = try parseTest(&arena, "return");
 
     try testing.expectEqual(@as(usize, 1), prog.statements.len);
     try testing.expect(prog.statements[0].kind == .@"return");
     try testing.expectEqual(@as(?[]const WordPart, null), prog.statements[0].kind.@"return");
 }
 
-test "return statement with status" {
+test "Return: with status" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    const allocator = arena.allocator();
 
-    const input = "return 1";
-    var lex = lexer.Lexer.init(allocator, input);
-    const tokens = try lex.tokenize();
-
-    var p = Parser.initWithInput(allocator, tokens, input);
-    const prog = try p.parse();
+    const prog = try parseTest(&arena, "return 1");
 
     try testing.expectEqual(@as(usize, 1), prog.statements.len);
     try testing.expect(prog.statements[0].kind == .@"return");
@@ -1177,17 +1073,11 @@ test "return statement with status" {
     try testing.expectEqualStrings("1", parts[0].text);
 }
 
-test "return statement with zero" {
+test "Return: with zero" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    const allocator = arena.allocator();
 
-    const input = "return 0";
-    var lex = lexer.Lexer.init(allocator, input);
-    const tokens = try lex.tokenize();
-
-    var p = Parser.initWithInput(allocator, tokens, input);
-    const prog = try p.parse();
+    const prog = try parseTest(&arena, "return 0");
 
     try testing.expectEqual(@as(usize, 1), prog.statements.len);
     try testing.expect(prog.statements[0].kind == .@"return");
@@ -1196,17 +1086,11 @@ test "return statement with zero" {
     try testing.expectEqualStrings("0", parts[0].text);
 }
 
-test "return statement with variable" {
+test "Return: with variable" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    const allocator = arena.allocator();
 
-    const input = "return $status";
-    var lex = lexer.Lexer.init(allocator, input);
-    const tokens = try lex.tokenize();
-
-    var p = Parser.initWithInput(allocator, tokens, input);
-    const prog = try p.parse();
+    const prog = try parseTest(&arena, "return $status");
 
     try testing.expectEqual(@as(usize, 1), prog.statements.len);
     try testing.expect(prog.statements[0].kind == .@"return");

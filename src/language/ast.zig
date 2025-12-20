@@ -18,17 +18,27 @@ const tokens = @import("tokens.zig");
 pub const WordPart = tokens.WordPart;
 pub const QuoteKind = tokens.QuoteKind;
 
+// =============================================================================
+// Function and Control Flow Definitions
+// =============================================================================
+
+/// A function definition: `fun name ... end`
 pub const FunctionDefinition = struct {
+    /// The function name (must be an unquoted bare word)
     name: []const u8,
+    /// The raw source of the function body (parsed on-demand during execution)
     body: []const u8,
 };
 
-/// A single if/else-if branch with its condition and body
+/// A single if/else-if branch with its condition and body.
 pub const IfBranch = struct {
+    /// The condition source (e.g., "test $x -eq 1")
     condition: []const u8,
+    /// The body source to execute if condition is true
     body: []const u8,
 };
 
+/// An if statement with optional else-if chains and else clause.
 pub const IfStatement = struct {
     /// First element is the "if" branch, rest are "else if" branches
     branches: []const IfBranch,
@@ -36,91 +46,156 @@ pub const IfStatement = struct {
     else_body: ?[]const u8,
 };
 
+/// A for loop: `for var in items... end`
 pub const ForStatement = struct {
+    /// The loop variable name
     variable: []const u8,
-    items_source: []const u8, // The raw source of items to iterate over
+    /// The raw source of items to iterate over (parsed on-demand)
+    items_source: []const u8,
+    /// The loop body source
     body: []const u8,
 };
 
+/// A while loop: `while condition... end`
 pub const WhileStatement = struct {
+    /// The condition source to evaluate each iteration
     condition: []const u8,
+    /// The loop body source
     body: []const u8,
 };
 
+// =============================================================================
+// Output Capture
+// =============================================================================
+
+/// How to capture command output.
 pub const CaptureMode = enum {
+    /// Capture as a single string (trims trailing newline)
     string,
+    /// Capture as an array of lines
     lines,
 };
 
+/// Output capture specification: `command => var` or `command =>@ var`
 pub const Capture = struct {
+    /// Whether to capture as string or lines
     mode: CaptureMode,
+    /// The variable name to store the captured output
     variable: []const u8,
 };
 
+// =============================================================================
+// Redirections
+// =============================================================================
+
+/// The type of I/O redirection.
 pub const RedirectKind = union(enum) {
-    /// Redirect input from a file to fd (defaults to 0)
+    /// Redirect input from a file to fd (defaults to stdin)
     read: []const WordPart,
-    /// Redirect output to a file (truncate) from fd (defaults to 1)
+    /// Redirect output to a file (truncate) from fd (defaults to stdout)
     write_truncate: []const WordPart,
-    /// Redirect output to a file (append) from fd (defaults to 1)
+    /// Redirect output to a file (append) from fd (defaults to stdout)
     write_append: []const WordPart,
-    /// Duplicate one fd to another (fd -> dup_to)
+    /// Duplicate one fd to another (e.g., 2>&1)
     dup: u8,
 };
 
+/// A single I/O redirection (e.g., `< input.txt`, `> output.txt`, `2>&1`)
 pub const Redirect = struct {
-    /// File descriptor being redirected (parsed from operator, e.g., 2>)
+    /// File descriptor being redirected (0=stdin, 1=stdout, 2=stderr)
     from_fd: u8,
+    /// The type and target of the redirection
     kind: RedirectKind,
 };
 
+// =============================================================================
+// Commands and Pipelines
+// =============================================================================
+
+/// An environment variable assignment prefix (e.g., `FOO=bar cmd`)
 pub const Assignment = struct {
+    /// The variable name
     key: []const u8,
+    /// The value (may contain variables to expand)
     value: []const WordPart,
 };
 
+/// A single command with optional assignments, words, and redirects.
 pub const Command = struct {
+    /// Environment variable assignments (KEY=value) that prefix the command
     assignments: []const Assignment,
+    /// Command name and arguments (may contain variables to expand)
     words: []const []const WordPart,
+    /// I/O redirections (<, >, >>, 2>, 2>&1, etc.)
     redirects: []const Redirect,
 };
 
+/// Logical chain operator between pipelines.
 pub const ChainOperator = enum {
+    /// First command in chain (no preceding operator)
     none,
+    /// Execute if previous succeeded (&&, and)
     @"and",
+    /// Execute if previous failed (||, or)
     @"or",
 };
 
+/// A pipeline of commands connected by pipes.
 pub const Pipeline = struct {
+    /// Commands in the pipeline (connected by `|`)
     commands: []const Command,
 };
 
+/// A single element in a logical chain.
 pub const ChainItem = struct {
+    /// The operator preceding this pipeline (none for first)
     op: ChainOperator,
+    /// The pipeline to execute
     pipeline: Pipeline,
 };
 
+/// A command statement with logical chains, background, and capture options.
 pub const CommandStatement = struct {
+    /// The chain of pipelines (connected by &&, ||, and, or)
     chains: []const ChainItem,
+    /// Whether to run in background (&)
     background: bool,
+    /// Optional output capture (=> or =>@)
     capture: ?Capture,
 };
 
+// =============================================================================
+// Statements and Program
+// =============================================================================
+
+/// The kind of statement in the AST.
 pub const StatementKind = union(enum) {
+    /// A command statement (may include pipelines, chains, capture)
     command: CommandStatement,
+    /// A function definition
     function: FunctionDefinition,
+    /// An if/else-if/else statement
     @"if": IfStatement,
+    /// A for loop
     @"for": ForStatement,
+    /// A while loop
     @"while": WhileStatement,
+    /// Break out of the innermost loop
     @"break": void,
+    /// Continue to next iteration of innermost loop
     @"continue": void,
+    /// Return from current function with optional status
     @"return": ?[]const WordPart,
 };
 
+/// A single statement in the program.
 pub const Statement = struct {
+    /// The kind and data of this statement
     kind: StatementKind,
 };
 
+/// The top-level AST node representing a complete program.
 pub const Program = struct {
+    /// All statements in the program, in order
     statements: []const Statement,
 };
