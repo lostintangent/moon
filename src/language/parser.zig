@@ -606,17 +606,10 @@ pub const Parser = struct {
         const end_span = if (end_pos < self.tokens.len)
             self.tokens[end_pos].span
         else
-            TokenSpan{
-                .start_line = 1,
-                .start_col = 1,
-                .end_line = 1,
-                .end_col = 1,
-                .start_index = self.input.len,
-                .end_index = self.input.len,
-            };
+            TokenSpan{ .start = self.input.len, .end = self.input.len };
 
-        const start_byte = start_span.start_index;
-        const end_byte = end_span.start_index;
+        const start_byte = start_span.start;
+        const end_byte = end_span.start;
 
         if (start_byte >= end_byte or end_byte > self.input.len) {
             return "";

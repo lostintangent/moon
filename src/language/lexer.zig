@@ -20,65 +20,75 @@ const WordPart = token_types.WordPart;
 const QuoteKind = token_types.QuoteKind;
 const TokenSpan = token_types.TokenSpan;
 
+/// Lexical analysis errors.
 pub const LexError = error{
     UnterminatedString,
     UnterminatedCmdSub,
-    OutOfMemory,
 };
 
 pub const Lexer = struct {
     input: []const u8,
     pos: usize,
-    line: usize,
-    col: usize,
     allocator: std.mem.Allocator,
 
     pub fn init(allocator: std.mem.Allocator, input: []const u8) Lexer {
         return .{
             .input = input,
             .pos = 0,
-            .line = 1,
-            .col = 1,
             .allocator = allocator,
         };
     }
 
-    fn peek(self: *Lexer) ?u8 {
-        if (self.pos >= self.input.len) return null;
-        return self.input[self.pos];
+    // =========================================================================
+    // Input navigation helpers
+    // =========================================================================
+
+    /// Returns the character at the current position, or null if at end of input.
+    inline fn peek(self: *const Lexer) ?u8 {
+        return if (self.pos < self.input.len) self.input[self.pos] else null;
     }
 
-    fn peekAt(self: *Lexer, offset: usize) ?u8 {
-        if (self.pos + offset >= self.input.len) return null;
-        return self.input[self.pos + offset];
+    /// Returns the character at `offset` positions ahead, or null if out of bounds.
+    inline fn peekAt(self: *const Lexer, offset: usize) ?u8 {
+        const idx = self.pos + offset;
+        return if (idx < self.input.len) self.input[idx] else null;
     }
 
-    fn peekN(self: *Lexer, n: usize) ?[]const u8 {
-        if (self.pos + n > self.input.len) return null;
-        return self.input[self.pos .. self.pos + n];
+    /// Returns a slice of `len` characters starting at current position, or null if not enough input.
+    inline fn peekSlice(self: *const Lexer, len: usize) ?[]const u8 {
+        return if (self.pos + len <= self.input.len) self.input[self.pos .. self.pos + len] else null;
     }
 
-    fn advance(self: *Lexer) void {
-        if (self.pos >= self.input.len) return;
-        const c = self.input[self.pos];
-        self.pos += 1;
-        if (c == '\n') {
-            self.line += 1;
-            self.col = 1;
-        } else {
-            self.col += 1;
-        }
+    /// Advances position by one character.
+    inline fn advance(self: *Lexer) void {
+        if (self.pos < self.input.len) self.pos += 1;
     }
 
+    /// Advances position by `n` characters.
+    inline fn advanceBy(self: *Lexer, n: usize) void {
+        self.pos = @min(self.pos + n, self.input.len);
+    }
+
+    /// Creates a TokenSpan from `start` to current position.
+    inline fn makeSpan(self: *const Lexer, start: usize) TokenSpan {
+        return .{ .start = start, .end = self.pos };
+    }
+
+    // =========================================================================
+    // Whitespace and comment handling
+    // =========================================================================
+
+    /// Skips spaces and tabs (not newlines - those are separators).
     fn skipWhitespace(self: *Lexer) void {
-        while (self.peek()) |c| {
-            switch (c) {
-                ' ', '\t' => self.advance(),
+        while (self.pos < self.input.len) {
+            switch (self.input[self.pos]) {
+                ' ', '\t' => self.pos += 1,
                 else => break,
             }
         }
     }
 
+    /// Skips a comment if present (from `#` to end of line). Returns true if skipped.
     fn trySkipComment(self: *Lexer) bool {
         if (self.peek() != '#') return false;
         while (self.peek()) |c| {
@@ -88,95 +98,147 @@ pub const Lexer = struct {
         return true;
     }
 
-    fn isWordBreak(c: u8) bool {
-        return c == ' ' or c == '\t' or c == '\n' or c == ';';
-    }
+    // =========================================================================
+    // Operator handling
+    // =========================================================================
 
-    fn tryReadOperator(self: *Lexer, tokens: ?*std.ArrayListUnmanaged(Token)) LexError!bool {
+    /// Checks if an operator starts at the current position. Returns the operator or null.
+    fn peekOperator(self: *const Lexer) ?[]const u8 {
         for (token_types.operators) |op| {
-            if (self.peekN(op.len)) |s| {
-                if (std.mem.eql(u8, s, op)) {
-                    if (tokens) |toks| {
-                        const start_line = self.line;
-                        const start_col = self.col;
-                        const start_pos = self.pos;
-                        for (0..op.len) |_| {
-                            self.advance();
-                        }
-                        const span: TokenSpan = .{
-                            .start_line = start_line,
-                            .start_col = start_col,
-                            .end_line = self.line,
-                            .end_col = self.col,
-                            .start_index = start_pos,
-                            .end_index = self.pos,
-                        };
-                        try toks.append(self.allocator, Token.initOp(op, span));
-                    }
-                    return true;
-                }
+            if (self.peekSlice(op.len)) |s| {
+                if (std.mem.eql(u8, s, op)) return op;
             }
         }
-        return false;
+        return null;
     }
 
-    fn tryReadSeparator(self: *Lexer, tokens: *std.ArrayListUnmanaged(Token)) LexError!bool {
+    /// Reads an operator token if present. Returns true if an operator was read.
+    fn tryReadOperator(self: *Lexer, tokens: *std.ArrayListUnmanaged(Token)) error{OutOfMemory}!bool {
+        const op = self.peekOperator() orelse return false;
+        const start = self.pos;
+        self.advanceBy(op.len);
+        try tokens.append(self.allocator, Token.initOp(op, self.makeSpan(start)));
+        return true;
+    }
+
+    /// Reads a separator token (newline or semicolon) if present. Returns true if read.
+    fn tryReadSeparator(self: *Lexer, tokens: *std.ArrayListUnmanaged(Token)) error{OutOfMemory}!bool {
         const c = self.peek() orelse return false;
         const sep: []const u8 = switch (c) {
             '\n' => "\n",
             ';' => ";",
             else => return false,
         };
-        const span: TokenSpan = .{
-            .start_line = self.line,
-            .start_col = self.col,
-            .end_line = self.line,
-            .end_col = self.col + 1,
-            .start_index = self.pos,
-            .end_index = self.pos + 1,
-        };
+        const start = self.pos;
         self.advance();
-        try tokens.append(self.allocator, Token.initSep(sep, span));
+        try tokens.append(self.allocator, Token.initSep(sep, self.makeSpan(start)));
         return true;
     }
 
-    /// Handle escape sequences inside double-quoted strings.
+    // =========================================================================
+    // Escape sequence handling
+    // =========================================================================
+
+    /// Handles escape sequences in double-quoted strings.
     /// Processes the character after a backslash and appends the result to buf.
-    fn handleDoubleQuotedEscape(self: *Lexer, buf: *std.ArrayListUnmanaged(u8)) LexError!void {
+    fn handleDoubleQuotedEscape(self: *Lexer, buf: *std.ArrayListUnmanaged(u8)) error{OutOfMemory}!void {
         const next = self.peek() orelse {
             try buf.append(self.allocator, '\\');
             return;
         };
-        const char: u8 = switch (next) {
-            '"', '\\' => next,
-            'n' => '\n',
-            't' => '\t',
-            '$' => {
-                try buf.append(self.allocator, '\\');
-                try buf.append(self.allocator, '$');
-                self.advance();
-                return;
-            },
-            else => {
-                try buf.append(self.allocator, '\\');
+
+        switch (next) {
+            '"', '\\' => {
                 try buf.append(self.allocator, next);
                 self.advance();
-                return;
             },
+            'n' => {
+                try buf.append(self.allocator, '\n');
+                self.advance();
+            },
+            't' => {
+                try buf.append(self.allocator, '\t');
+                self.advance();
+            },
+            '$' => {
+                // Preserve escape so expansion treats `$` literally
+                try buf.appendSlice(self.allocator, "\\$");
+                self.advance();
+            },
+            else => {
+                // Unknown escape: preserve both characters
+                try buf.appendSlice(self.allocator, &.{ '\\', next });
+                self.advance();
+            },
+        }
+    }
+
+    /// Handles escape sequences in bare words.
+    /// Simpler than double-quoted: only `\$` is special (preserved for expander).
+    fn handleBareWordEscape(self: *Lexer, buf: *std.ArrayListUnmanaged(u8)) error{OutOfMemory}!void {
+        const next = self.peek() orelse {
+            try buf.append(self.allocator, '\\');
+            return;
         };
-        try buf.append(self.allocator, char);
+
+        if (next == '$') {
+            // Preserve escape so expansion treats `$` literally
+            try buf.appendSlice(self.allocator, "\\$");
+        } else {
+            // Other escapes: just append the escaped character
+            try buf.append(self.allocator, next);
+        }
         self.advance();
     }
 
-    fn readSingleQuoted(self: *Lexer, segs: *std.ArrayListUnmanaged(WordPart)) LexError!void {
-        self.advance();
+    // =========================================================================
+    // Command substitution handling
+    // =========================================================================
+
+    /// Reads a command substitution `$(...)` with nested parenthesis matching.
+    /// Assumes we're positioned at the `$` of `$(`.
+    fn readCommandSubstitution(self: *Lexer, buf: *std.ArrayListUnmanaged(u8)) (error{OutOfMemory} || LexError)!void {
+        std.debug.assert(self.peek() == '$');
+        std.debug.assert(self.peekAt(1) == '(');
+
+        try buf.appendSlice(self.allocator, "$(");
+        self.advanceBy(2); // skip `$(`
+
+        var depth: usize = 1;
+        while (self.peek()) |ch| {
+            switch (ch) {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if (depth == 0) {
+                        try buf.append(self.allocator, ')');
+                        self.advance();
+                        return;
+                    }
+                },
+                // TODO: Handle escaped parens and quoted strings containing parens
+                else => {},
+            }
+            try buf.append(self.allocator, ch);
+            self.advance();
+        }
+        return LexError.UnterminatedCmdSub;
+    }
+
+    // =========================================================================
+    // Word reading (quoted and bare)
+    // =========================================================================
+
+    /// Reads a single-quoted string (no escape processing, literal content).
+    fn readSingleQuoted(self: *Lexer, parts: *std.ArrayListUnmanaged(WordPart)) (error{OutOfMemory} || LexError)!void {
+        self.advance(); // skip opening quote
         const start = self.pos;
 
         while (self.peek()) |c| {
             if (c == '\'') {
                 const content = self.input[start..self.pos];
-                self.advance();
-                try segs.append(self.allocator, .{ .quotes = .single, .text = content });
+                self.advance(); // skip closing quote
+                try parts.append(self.allocator, .{ .quotes = .single, .text = content });
                 return;
             }
             self.advance();
@@ -184,145 +246,113 @@ pub const Lexer = struct {
         return LexError.UnterminatedString;
     }
 
-    fn readDoubleQuoted(self: *Lexer, segs: *std.ArrayListUnmanaged(WordPart), buf: *std.ArrayListUnmanaged(u8)) LexError!void {
-        self.advance();
+    /// Reads a double-quoted string (with escape processing).
+    fn readDoubleQuoted(self: *Lexer, parts: *std.ArrayListUnmanaged(WordPart), buf: *std.ArrayListUnmanaged(u8)) (error{OutOfMemory} || LexError)!void {
+        self.advance(); // skip opening quote
         buf.clearRetainingCapacity();
 
         while (self.peek()) |c| {
-            if (c == '"') {
-                self.advance();
-                const content = try self.allocator.dupe(u8, buf.items);
-                try segs.append(self.allocator, .{ .quotes = .double, .text = content });
-                return;
-            } else if (c == '\\') {
-                self.advance();
-                try self.handleDoubleQuotedEscape(buf);
-            } else {
-                try buf.append(self.allocator, c);
-                self.advance();
+            switch (c) {
+                '"' => {
+                    self.advance(); // skip closing quote
+                    const content = try self.allocator.dupe(u8, buf.items);
+                    try parts.append(self.allocator, .{ .quotes = .double, .text = content });
+                    return;
+                },
+                '\\' => {
+                    self.advance();
+                    try self.handleDoubleQuotedEscape(buf);
+                },
+                else => {
+                    try buf.append(self.allocator, c);
+                    self.advance();
+                },
             }
         }
         return LexError.UnterminatedString;
     }
 
-    fn readBareWord(self: *Lexer, segs: *std.ArrayListUnmanaged(WordPart), buf: *std.ArrayListUnmanaged(u8)) LexError!bool {
+    /// Reads an unquoted (bare) word segment.
+    /// Returns true if any content was read.
+    fn readBareWord(self: *Lexer, parts: *std.ArrayListUnmanaged(WordPart), buf: *std.ArrayListUnmanaged(u8)) (error{OutOfMemory} || LexError)!bool {
         buf.clearRetainingCapacity();
 
         while (self.peek()) |c| {
-            if (try self.tryReadOperator(null)) break;
+            // Stop at operators
+            if (self.peekOperator() != null) break;
 
-            if (c == '\\') {
-                self.advance();
-                if (self.peek()) |next| {
-                    if (next == '$') {
-                        // Preserve escape so expansion treats `$` literally.
-                        try buf.append(self.allocator, '\\');
-                        try buf.append(self.allocator, '$');
+            switch (c) {
+                '\\' => {
+                    self.advance();
+                    try self.handleBareWordEscape(buf);
+                },
+                '"', '\'' => break, // Quote starts new segment
+                ' ', '\t', '\n', ';' => break, // Word break
+                '$' => {
+                    if (self.peekAt(1) == '(') {
+                        try self.readCommandSubstitution(buf);
                     } else {
-                        try buf.append(self.allocator, next);
+                        try buf.append(self.allocator, c);
+                        self.advance();
                     }
+                },
+                else => {
+                    try buf.append(self.allocator, c);
                     self.advance();
-                } else {
-                    try buf.append(self.allocator, '\\');
-                }
-            } else if (c == '"' or c == '\'') {
-                break;
-            } else if (isWordBreak(c)) {
-                break;
-            } else if (c == '$' and self.peekAt(1) == '(') {
-                // Command substitution: read $(...)  with paren matching
-                try buf.append(self.allocator, '$');
-                self.advance();
-                try buf.append(self.allocator, '(');
-                self.advance();
-
-                var depth: usize = 1;
-                while (self.peek()) |ch| {
-                    if (ch == '(') {
-                        depth += 1;
-                    } else if (ch == ')') {
-                        depth -= 1;
-                        if (depth == 0) {
-                            try buf.append(self.allocator, ')');
-                            self.advance();
-                            break;
-                        }
-                    }
-                    try buf.append(self.allocator, ch);
-                    self.advance();
-                } else {
-                    return LexError.UnterminatedCmdSub;
-                }
-            } else {
-                try buf.append(self.allocator, c);
-                self.advance();
+                },
             }
         }
 
         if (buf.items.len > 0) {
             const content = try self.allocator.dupe(u8, buf.items);
-            try segs.append(self.allocator, .{ .quotes = .none, .text = content });
+            try parts.append(self.allocator, .{ .quotes = .none, .text = content });
             return true;
         }
         return false;
     }
 
-    fn readWord(self: *Lexer, tokens: *std.ArrayListUnmanaged(Token)) LexError!void {
+    /// Reads a complete word token (may contain multiple quoted/unquoted segments).
+    fn readWord(self: *Lexer, tokens: *std.ArrayListUnmanaged(Token)) (error{OutOfMemory} || LexError)!void {
         var parts: std.ArrayListUnmanaged(WordPart) = .empty;
         var buffer: std.ArrayListUnmanaged(u8) = .empty;
         defer buffer.deinit(self.allocator);
 
-        const start_line = self.line;
-        const start_col = self.col;
-        const start_pos = self.pos;
+        const start = self.pos;
 
         while (self.peek()) |c| {
-            if (c == '"') {
-                try self.readDoubleQuoted(&parts, &buffer);
-            } else if (c == '\'') {
-                try self.readSingleQuoted(&parts);
-            } else if (isWordBreak(c)) {
-                break;
-            } else if (try self.tryReadOperator(null)) {
-                break;
-            } else {
-                const read_something = try self.readBareWord(&parts, &buffer);
-                if (!read_something) break;
+            switch (c) {
+                '"' => try self.readDoubleQuoted(&parts, &buffer),
+                '\'' => try self.readSingleQuoted(&parts),
+                ' ', '\t', '\n', ';' => break,
+                else => {
+                    if (self.peekOperator() != null) break;
+                    if (!try self.readBareWord(&parts, &buffer)) break;
+                },
             }
         }
 
         if (parts.items.len > 0) {
-            // Note: We no longer auto-promote text operators (like 'and', 'or', 'if', 'else', 'end', 'fun')
-            // to op tokens here. The parser checks for keywords contextually using isKeyword().
-            // This allows these words to appear as regular arguments: echo if and else
-            const span: TokenSpan = .{
-                .start_line = start_line,
-                .start_col = start_col,
-                .end_line = self.line,
-                .end_col = self.col,
-                .start_index = start_pos,
-                .end_index = self.pos,
-            };
-
             const parts_slice = try parts.toOwnedSlice(self.allocator);
-            try tokens.append(self.allocator, Token.initWord(parts_slice, span));
+            try tokens.append(self.allocator, Token.initWord(parts_slice, self.makeSpan(start)));
         }
     }
 
-    pub fn tokenize(self: *Lexer) LexError![]Token {
+    // =========================================================================
+    // Main tokenization entry point
+    // =========================================================================
+
+    /// Tokenizes the input and returns an owned slice of tokens.
+    pub fn tokenize(self: *Lexer) (error{OutOfMemory} || LexError)![]Token {
         var tokens: std.ArrayListUnmanaged(Token) = .empty;
 
         while (self.pos < self.input.len) {
-            // Skip whitespace and comments
             self.skipWhitespace();
             if (self.peek() == null) break;
             if (self.trySkipComment()) continue;
 
-            // Try reading operators and separators
             if (try self.tryReadSeparator(&tokens)) continue;
             if (try self.tryReadOperator(&tokens)) continue;
 
-            // Read the next word
             try self.readWord(&tokens);
         }
 
@@ -336,11 +366,13 @@ pub const Lexer = struct {
 
 const testing = std.testing;
 
+/// Asserts that a token has the expected kind.
 fn expectTokenKind(tok: Token, expected: std.meta.Tag(token_types.TokenKind)) !void {
     try testing.expectEqual(expected, std.meta.activeTag(tok.kind));
 }
 
-fn expectBareSegText(segs: []const WordPart, expected: []const u8) !void {
+/// Asserts that a word token has a single bare segment with the expected text.
+fn expectBareWord(segs: []const WordPart, expected: []const u8) !void {
     if (segs.len == 1 and segs[0].quotes == .none) {
         try testing.expectEqualStrings(expected, segs[0].text);
         return;
@@ -348,28 +380,32 @@ fn expectBareSegText(segs: []const WordPart, expected: []const u8) !void {
     return error.TestExpectedEqual;
 }
 
+/// Tokenizes input and returns tokens (using arena allocator for cleanup).
+fn tokenizeTest(arena: *std.heap.ArenaAllocator, input: []const u8) ![]Token {
+    var lex = Lexer.init(arena.allocator(), input);
+    return try lex.tokenize();
+}
+
 test "Words: simple bare words" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
 
-    var lex = Lexer.init(arena.allocator(), "echo hello world");
-    const tokens = try lex.tokenize();
+    const tokens = try tokenizeTest(&arena, "echo hello world");
 
     try testing.expectEqual(@as(usize, 3), tokens.len);
     try expectTokenKind(tokens[0], .word);
     try expectTokenKind(tokens[1], .word);
     try expectTokenKind(tokens[2], .word);
-    try expectBareSegText(tokens[0].kind.word, "echo");
-    try expectBareSegText(tokens[1].kind.word, "hello");
-    try expectBareSegText(tokens[2].kind.word, "world");
+    try expectBareWord(tokens[0].kind.word, "echo");
+    try expectBareWord(tokens[1].kind.word, "hello");
+    try expectBareWord(tokens[2].kind.word, "world");
 }
 
 test "Words: single quoted string" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
 
-    var lex = Lexer.init(arena.allocator(), "echo 'hello world'");
-    const tokens = try lex.tokenize();
+    const tokens = try tokenizeTest(&arena, "echo 'hello world'");
 
     try testing.expectEqual(@as(usize, 2), tokens.len);
     const segs = tokens[1].kind.word;
@@ -382,8 +418,7 @@ test "Words: double quoted string" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
 
-    var lex = Lexer.init(arena.allocator(), "echo \"hello world\"");
-    const tokens = try lex.tokenize();
+    const tokens = try tokenizeTest(&arena, "echo \"hello world\"");
 
     try testing.expectEqual(@as(usize, 2), tokens.len);
     const segs = tokens[1].kind.word;
@@ -396,8 +431,7 @@ test "Words: mixed quote segments" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
 
-    var lex = Lexer.init(arena.allocator(), "echo hello\"world\"'!'");
-    const tokens = try lex.tokenize();
+    const tokens = try tokenizeTest(&arena, "echo hello\"world\"'!'");
 
     try testing.expectEqual(@as(usize, 2), tokens.len);
     const segs = tokens[1].kind.word;
@@ -414,8 +448,7 @@ test "Escapes: sequences in double quotes" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
 
-    var lex = Lexer.init(arena.allocator(), "echo \"hello\\nworld\\t!\"");
-    const tokens = try lex.tokenize();
+    const tokens = try tokenizeTest(&arena, "echo \"hello\\nworld\\t!\"");
 
     try testing.expectEqual(@as(usize, 2), tokens.len);
     const segs = tokens[1].kind.word;
@@ -427,8 +460,7 @@ test "Escapes: quote in double quotes" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
 
-    var lex = Lexer.init(arena.allocator(), "echo \"say \\\"hi\\\"\"");
-    const tokens = try lex.tokenize();
+    const tokens = try tokenizeTest(&arena, "echo \"say \\\"hi\\\"\"");
 
     try testing.expectEqual(@as(usize, 2), tokens.len);
     const segs = tokens[1].kind.word;
@@ -439,8 +471,7 @@ test "Escapes: dollar in bare word" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
 
-    var lex = Lexer.init(arena.allocator(), "echo \\$HOME");
-    const tokens = try lex.tokenize();
+    const tokens = try tokenizeTest(&arena, "echo \\$HOME");
 
     try testing.expectEqual(@as(usize, 2), tokens.len);
     // The lexer preserves \$ for the expander to handle
@@ -451,30 +482,27 @@ test "Command substitution: basic" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
 
-    var lex = Lexer.init(arena.allocator(), "echo $(whoami)");
-    const tokens = try lex.tokenize();
+    const tokens = try tokenizeTest(&arena, "echo $(whoami)");
 
     try testing.expectEqual(@as(usize, 2), tokens.len);
-    try expectBareSegText(tokens[1].kind.word, "$(whoami)");
+    try expectBareWord(tokens[1].kind.word, "$(whoami)");
 }
 
 test "Command substitution: nested" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
 
-    var lex = Lexer.init(arena.allocator(), "echo $(dirname $(pwd))");
-    const tokens = try lex.tokenize();
+    const tokens = try tokenizeTest(&arena, "echo $(dirname $(pwd))");
 
     try testing.expectEqual(@as(usize, 2), tokens.len);
-    try expectBareSegText(tokens[1].kind.word, "$(dirname $(pwd))");
+    try expectBareWord(tokens[1].kind.word, "$(dirname $(pwd))");
 }
 
 test "Operators: pipe" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
 
-    var lex = Lexer.init(arena.allocator(), "cat file | grep foo");
-    const tokens = try lex.tokenize();
+    const tokens = try tokenizeTest(&arena, "cat file | grep foo");
 
     try testing.expectEqual(@as(usize, 5), tokens.len);
     try expectTokenKind(tokens[2], .operator);
@@ -485,8 +513,7 @@ test "Operators: pipe arrow" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
 
-    var lex = Lexer.init(arena.allocator(), "cat file |> grep foo");
-    const tokens = try lex.tokenize();
+    const tokens = try tokenizeTest(&arena, "cat file |> grep foo");
 
     try testing.expectEqual(@as(usize, 5), tokens.len);
     try expectTokenKind(tokens[2], .operator);
@@ -497,8 +524,7 @@ test "Operators: logical" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
 
-    var lex = Lexer.init(arena.allocator(), "true && echo ok || echo fail");
-    const tokens = try lex.tokenize();
+    const tokens = try tokenizeTest(&arena, "true && echo ok || echo fail");
 
     try testing.expectEqualStrings("&&", tokens[1].kind.operator);
     try testing.expectEqualStrings("||", tokens[4].kind.operator);
@@ -508,8 +534,7 @@ test "Operators: text logical as words" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
 
-    var lex = Lexer.init(arena.allocator(), "true and echo ok or echo fail");
-    const tokens = try lex.tokenize();
+    const tokens = try tokenizeTest(&arena, "true and echo ok or echo fail");
 
     // Text operators are now lexed as words, not ops
     // The parser checks for them contextually
@@ -523,8 +548,7 @@ test "Operators: background" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
 
-    var lex = Lexer.init(arena.allocator(), "sleep 1 & echo done");
-    const tokens = try lex.tokenize();
+    const tokens = try tokenizeTest(&arena, "sleep 1 & echo done");
 
     try testing.expectEqual(@as(usize, 5), tokens.len);
     try expectTokenKind(tokens[2], .operator);
@@ -535,8 +559,7 @@ test "Operators: capture" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
 
-    var lex = Lexer.init(arena.allocator(), "echo hi => out");
-    const tokens = try lex.tokenize();
+    const tokens = try tokenizeTest(&arena, "echo hi => out");
 
     try testing.expectEqual(@as(usize, 4), tokens.len);
     try expectTokenKind(tokens[2], .operator);
@@ -547,8 +570,7 @@ test "Operators: capture lines" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
 
-    var lex = Lexer.init(arena.allocator(), "ls =>@ files");
-    const tokens = try lex.tokenize();
+    const tokens = try tokenizeTest(&arena, "ls =>@ files");
 
     try testing.expectEqual(@as(usize, 3), tokens.len);
     try expectTokenKind(tokens[1], .operator);
@@ -559,8 +581,7 @@ test "Operators: redirections" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
 
-    var lex = Lexer.init(arena.allocator(), "cmd < in > out >> append 2> err 2>&1");
-    const tokens = try lex.tokenize();
+    const tokens = try tokenizeTest(&arena, "cmd < in > out >> append 2> err 2>&1");
 
     try testing.expectEqual(@as(usize, 10), tokens.len);
     try testing.expectEqualStrings("<", tokens[1].kind.operator);
@@ -574,21 +595,19 @@ test "Operators: adjacent to word" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
 
-    var lex = Lexer.init(arena.allocator(), "echo|cat");
-    const tokens = try lex.tokenize();
+    const tokens = try tokenizeTest(&arena, "echo|cat");
 
     try testing.expectEqual(@as(usize, 3), tokens.len);
-    try expectBareSegText(tokens[0].kind.word, "echo");
+    try expectBareWord(tokens[0].kind.word, "echo");
     try testing.expectEqualStrings("|", tokens[1].kind.operator);
-    try expectBareSegText(tokens[2].kind.word, "cat");
+    try expectBareWord(tokens[2].kind.word, "cat");
 }
 
 test "Separators: semicolon" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
 
-    var lex = Lexer.init(arena.allocator(), "echo a; echo b");
-    const tokens = try lex.tokenize();
+    const tokens = try tokenizeTest(&arena, "echo a; echo b");
 
     try testing.expectEqual(@as(usize, 5), tokens.len);
     try expectTokenKind(tokens[2], .separator);
@@ -598,8 +617,7 @@ test "Separators: newline" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
 
-    var lex = Lexer.init(arena.allocator(), "echo a\necho b");
-    const tokens = try lex.tokenize();
+    const tokens = try tokenizeTest(&arena, "echo a\necho b");
 
     try testing.expectEqual(@as(usize, 5), tokens.len);
     try expectTokenKind(tokens[2], .separator);
@@ -610,8 +628,7 @@ test "Comments: trailing comment" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
 
-    var lex = Lexer.init(arena.allocator(), "echo hello # this is a comment");
-    const tokens = try lex.tokenize();
+    const tokens = try tokenizeTest(&arena, "echo hello # this is a comment");
 
     try testing.expectEqual(@as(usize, 2), tokens.len);
 }
@@ -620,20 +637,18 @@ test "Comments: hash inside bare word" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
 
-    var lex = Lexer.init(arena.allocator(), "echo foo#bar");
-    const tokens = try lex.tokenize();
+    const tokens = try tokenizeTest(&arena, "echo foo#bar");
 
     try testing.expectEqual(@as(usize, 2), tokens.len);
     try expectTokenKind(tokens[1], .word);
-    try expectBareSegText(tokens[1].kind.word, "foo#bar");
+    try expectBareWord(tokens[1].kind.word, "foo#bar");
 }
 
 test "Edge cases: empty input" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
 
-    var lex = Lexer.init(arena.allocator(), "");
-    const tokens = try lex.tokenize();
+    const tokens = try tokenizeTest(&arena, "");
     try testing.expectEqual(@as(usize, 0), tokens.len);
 }
 
@@ -641,8 +656,7 @@ test "Edge cases: whitespace only" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
 
-    var lex = Lexer.init(arena.allocator(), "   \t  ");
-    const tokens = try lex.tokenize();
+    const tokens = try tokenizeTest(&arena, "   \t  ");
 
     try testing.expectEqual(@as(usize, 0), tokens.len);
 }

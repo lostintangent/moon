@@ -3,7 +3,7 @@
 //! Type hierarchy:
 //! - `Token`: A lexical unit produced by the lexer, containing:
 //!   - `TokenKind`: A union of either a word, operator, or separator
-//!   - `TokenSpan`: The source position of the token  (line/column and byte indices) in the script/command
+//!   - `TokenSpan`: The source position of the token (byte indices) in the script/command
 //! - `WordPart`: A segment of a word token with its quoting context
 //!       (e.g., `hello"world"` produces two WordParts: one unquoted, one double-quoted)
 //!
@@ -38,18 +38,28 @@ pub const WordPart = struct {
     }
 };
 
-/// Source location for a token.
-///
-/// Contains both line/column positions (for human-readable error messages) and
-/// byte indices (for O(1) source slicing). Currently only byte indices are used;
-/// line/column will be used for error reporting and debugging in the future.
+/// Source location for a token as byte indices for O(1) source slicing.
+/// Line/column positions can be computed on-demand from byte indices when needed
+/// for error reporting (see `getLineCol`).
 pub const TokenSpan = struct {
-    start_line: usize,
-    start_col: usize,
-    end_line: usize,
-    end_col: usize,
-    start_index: usize,
-    end_index: usize,
+    start: usize,
+    end: usize,
+
+    /// Computes line and column numbers from a byte position.
+    /// Useful for error messages - only computed when actually needed.
+    pub fn getLineCol(input: []const u8, byte_pos: usize) struct { line: usize, col: usize } {
+        var line: usize = 1;
+        var col: usize = 1;
+        for (input[0..@min(byte_pos, input.len)]) |c| {
+            if (c == '\n') {
+                line += 1;
+                col = 1;
+            } else {
+                col += 1;
+            }
+        }
+        return .{ .line = line, .col = col };
+    }
 };
 
 pub const TokenKind = union(enum) {
@@ -75,9 +85,8 @@ pub const Token = struct {
     }
 };
 
-/// Operators recognized by the lexer.
-/// IMPORTANT: Ordered by descending length so longer operators match first.
-/// (e.g., "2>&1" must precede "2>" to avoid premature matching)
+/// Operators recognized by the lexer, ordered by descending length so longer
+/// operators match first (e.g., "2>&1" must precede "2>" to avoid premature matching).
 pub const operators = [_][]const u8{
     "2>&1", "=>@", "2>>", "&>", "|>", "&&", "||", "=>", "2>", ">>", "|", "&", "<", ">",
 };
@@ -114,10 +123,20 @@ pub fn isLogicalOperator(text: []const u8) bool {
     return logical_operators.has(text);
 }
 
+/// Returns true if `c` is a valid identifier character (alphanumeric or underscore).
 pub fn isIdentChar(c: u8) bool {
-    return (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or (c >= '0' and c <= '9') or c == '_';
+    return std.ascii.isAlphanumeric(c) or c == '_';
 }
 
+/// Returns true if `c` is a valid identifier start character (alphabetic or underscore).
 pub fn isIdentStart(c: u8) bool {
-    return (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or c == '_';
+    return std.ascii.isAlphabetic(c) or c == '_';
+}
+
+/// Returns true if `c` is a word boundary (whitespace or command separator).
+pub fn isWordBreak(c: u8) bool {
+    return switch (c) {
+        ' ', '\t', '\n', ';' => true,
+        else => false,
+    };
 }

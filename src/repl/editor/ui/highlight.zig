@@ -76,7 +76,7 @@ pub fn render(allocator: std.mem.Allocator, input: []const u8, writer: anytype, 
                     // Find the token whose word slice matches (by pointer identity)
                     for (toks) |tok| {
                         if (tok.kind == .word and tok.kind.word.ptr == first_word.ptr) {
-                            cmd_positions.put(tok.span.start_col - 1, true) catch {};
+                            cmd_positions.put(tok.span.start, true) catch {};
                             break;
                         }
                     }
@@ -91,8 +91,8 @@ pub fn render(allocator: std.mem.Allocator, input: []const u8, writer: anytype, 
     var pos: usize = 0;
 
     for (toks) |token| {
-        const start = token.span.start_col - 1;
-        const end = token.span.end_col - 1;
+        const start = token.span.start;
+        const end = token.span.end;
 
         // Write whitespace gap
         if (start > pos) {
