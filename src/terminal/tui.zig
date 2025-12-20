@@ -32,6 +32,7 @@ pub const Key = union(enum) {
     focus_in, // terminal gained focus
     focus_out, // terminal lost focus
     escape,
+    ctrl_space,
     mouse: MouseEvent,
     unknown,
 };
@@ -117,7 +118,7 @@ pub fn readKey(fd: posix.fd_t) !Key {
     // Ctrl+key
     if (c < 32) {
         return switch (c) {
-            0 => .unknown, // ctrl+space
+            0 => .ctrl_space, // ctrl+space
             1 => .{ .ctrl = 'a' }, // ctrl+a
             2 => .{ .ctrl = 'b' }, // ctrl+b
             3 => .interrupt, // ctrl+c

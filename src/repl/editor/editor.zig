@@ -7,6 +7,7 @@ const complete = @import("ui/complete.zig");
 const ansi = @import("../../terminal/ansi.zig");
 const State = @import("../../runtime/state.zig").State;
 const tui = @import("../../terminal/tui.zig");
+const interpreter = @import("../../interpreter/interpreter.zig");
 
 const History = history.History;
 const posix = std.posix;
@@ -85,6 +86,10 @@ pub const Editor = struct {
     /// Whether the display has been initialized (safe to render). Currently driven
     /// by focus events: first focus signals the terminal is visible and properly sized.
     display_initialized: bool,
+    /// AI suggestion from AGENT
+    ai_suggestion: ?[]u8,
+    /// Whether we are currently waiting for an AI suggestion
+    is_loading_suggestion: bool,
 
     pub fn init(allocator: std.mem.Allocator) Editor {
         return .{
@@ -105,6 +110,8 @@ pub const Editor = struct {
             .search_match_index = null,
             .has_focus = false,
             .display_initialized = false,
+            .ai_suggestion = null,
+            .is_loading_suggestion = false,
         };
     }
 
@@ -115,6 +122,9 @@ pub const Editor = struct {
         self.search_query.deinit(self.allocator);
         if (self.saved_line) |line| {
             self.allocator.free(line);
+        }
+        if (self.ai_suggestion) |s| {
+            self.allocator.free(s);
         }
     }
 
@@ -161,6 +171,10 @@ pub const Editor = struct {
             self.allocator.free(line);
             self.saved_line = null;
         }
+        if (self.ai_suggestion) |s| {
+            self.allocator.free(s);
+            self.ai_suggestion = null;
+        }
 
         try writeToTerminal(prompt_text);
 
@@ -179,6 +193,7 @@ pub const Editor = struct {
                     self.search_match_index = null;
                     try self.refreshSearch();
                 },
+                .ctrl_space => try self.queryAgent(),
                 .enter => {
                     // Clear suggestion text before newline by rewriting line without suggestion
                     try writeToTerminal("\r\x1b[K");
@@ -237,7 +252,97 @@ pub const Editor = struct {
                 },
                 else => {},
             }
+
+            // Clear AI suggestion if the user types something that invalidates it
+            // (Only clear if buffer no longer matches the start of suggestion)
+            if (self.ai_suggestion) |s| {
+                if (!std.mem.startsWith(u8, s, self.buf.items)) {
+                    self.allocator.free(s);
+                    self.ai_suggestion = null;
+                    try self.refreshLine();
+                }
+            }
         }
+    }
+
+    /// Query the AGENT for a command suggestion
+    fn queryAgent(self: *Editor) !void {
+        const state = self.state orelse return;
+        const agent_cmd = state.getVar("AGENT") orelse return;
+        if (agent_cmd.len == 0) return;
+
+        // Show loading state
+        self.is_loading_suggestion = true;
+        try self.refreshLine();
+
+        // Build context
+        var context = std.ArrayList(u8).init(self.allocator);
+        defer context.deinit();
+
+        try context.appendSlice("# Instructions\n");
+        try context.appendSlice("You are a command line assistant. Generate a command or complete the current command based on the context. Return ONLY the command text, no markdown, no explanations.\n\n");
+
+        if (state.getCwd()) |cwd| {
+            try context.print("# Current Working Directory\n{s}\n\n", .{cwd});
+        } catch {}
+
+        try context.print("# Last Exit Status\n{d}\n\n", .{state.status});
+
+        try context.appendSlice("# History\n");
+        var i = if (self.hist.entries.items.len > 10) self.hist.entries.items.len - 10 else 0;
+        while (i < self.hist.entries.items.len) : (i += 1) {
+            try context.print("{s}\n", .{self.hist.entries.items[i]});
+        }
+        try context.appendSlice("\n");
+
+        try context.print("# Current Input\n{s}\n", .{self.buf.items});
+
+        // Prepare command: $AGENT 'context'
+        // We need to escape single quotes in the context
+        var escaped_ctx = std.ArrayList(u8).init(self.allocator);
+        defer escaped_ctx.deinit();
+
+        for (context.items) |c| {
+            if (c == '\'') {
+                try escaped_ctx.appendSlice("'\\''");
+            } else {
+                try escaped_ctx.append(c);
+            }
+        }
+
+        const cmd_str = try std.fmt.allocPrint(self.allocator, "{s} '{s}'", .{ agent_cmd, escaped_ctx.items });
+        defer self.allocator.free(cmd_str);
+
+        // Execute AGENT
+        // Note: this blocks the UI (as requested)
+        // We restore terminal temporarily to allow child process execution if needed,
+        // although executeAndCapture handles pipes.
+        // However, since we are inside readLine loop which expects raw mode,
+        // and executeAndCapture might run a pipeline, let's keep it simple.
+        // But wait, executeAndCapture uses forkWithPipe. It doesn't use the terminal.
+        // So raw mode should be fine.
+
+        const output = interpreter.executeAndCapture(self.allocator, state, cmd_str) catch |err| blk: {
+            // On error, just clear loading and return
+            self.is_loading_suggestion = false;
+            try self.refreshLine();
+            return;
+        };
+
+        // Update state
+        if (self.ai_suggestion) |s| self.allocator.free(s);
+        self.ai_suggestion = output; // Output is already owned and trimmed (mostly)
+
+        // Trim any extra whitespace (newlines) from the suggestion
+        const trimmed = std.mem.trim(u8, self.ai_suggestion.?, " \n\r\t");
+        if (trimmed.len != self.ai_suggestion.?.len) {
+            const new_s = try self.allocator.dupe(u8, trimmed);
+            self.allocator.free(self.ai_suggestion.?);
+            self.ai_suggestion = new_s;
+        }
+
+        self.is_loading_suggestion = false;
+        try self.refreshLine();
     }
 
     /// Handle key input while in search mode.
@@ -482,7 +587,19 @@ pub const Editor = struct {
 
         // Write suggestion suffix (dimmed) if cursor is at end and focused
         if (self.suggestions and self.has_focus and self.cursor == self.buf.items.len) {
-            if (suggest.fromHistory(self.buf.items, &self.hist)) |suffix| {
+            if (self.is_loading_suggestion) {
+                try writer.writeAll(ansi.dim ++ "..." ++ ansi.reset ++ "\x1b[3D");
+            } else if (self.ai_suggestion) |s| {
+                 if (std.mem.startsWith(u8, s, self.buf.items)) {
+                    const suffix = s[self.buf.items.len..];
+                    if (suffix.len > 0) {
+                        try writer.writeAll(ansi.dim);
+                        try writer.writeAll(suffix);
+                        try writer.writeAll(ansi.reset);
+                        try writer.print("\x1b[{d}D", .{suffix.len});
+                    }
+                 }
+            } else if (suggest.fromHistory(self.buf.items, &self.hist)) |suffix| {
                 // Truncate suggestion to fit terminal width
                 const display_suffix = if (getTerminalWidth()) |term_width| blk: {
                     const used = ansi.displayLength(self.prompt) + self.buf.items.len;
@@ -522,6 +639,17 @@ pub const Editor = struct {
     /// Try to accept the current suggestion. Returns true if accepted.
     fn tryAcceptSuggestion(self: *Editor) !bool {
         if (!self.suggestions or self.cursor != self.buf.items.len) return false;
+
+        if (self.ai_suggestion) |s| {
+            if (std.mem.startsWith(u8, s, self.buf.items)) {
+                const suffix = s[self.buf.items.len..];
+                try self.buf.appendSlice(self.allocator, suffix);
+                self.cursor = self.buf.items.len;
+                try self.refreshLine();
+                return true;
+            }
+        }
+
         if (suggest.fromHistory(self.buf.items, &self.hist)) |suffix| {
             try self.buf.appendSlice(self.allocator, suffix);
             self.cursor = self.buf.items.len;
@@ -650,6 +778,8 @@ pub const Editor = struct {
             .search_match_index = null,
             .has_focus = true,
             .display_initialized = true,
+            .ai_suggestion = null,
+            .is_loading_suggestion = false,
         };
     }
 
