@@ -241,23 +241,29 @@ $(cmd)      → parse until matching )
 $1, $#, $*  → single special character
 ~           → tilde at word start
 *.txt       → glob metacharacters
+{a,b,c}     → brace expansion (comma-separated list)
+{*.txt}     → braced glob pattern
 ```
 
 Expansion results:
 
 ```
-$name     →  ["Alice"]           (from state.variables)
-$1        →  ["arg1"]            (positional parameter)
-$#        →  ["3"]               (argument count)
-$*        →  ["a", "b", "c"]     (all arguments)
-$xs[1]    →  ["first"]           (array index, 1-based)
-$xs[-1]   →  ["last"]            (negative index from end)
-$xs[2..4] →  ["b", "c", "d"]     (array slice, inclusive)
-*.txt     →  ["a.txt", "b.txt"]  (from filesystem)
-**/*.zig  →  ["src/main.zig", "src/lib/util.zig"]  (recursive glob)
-[a-z].md  →  ["a.md", "b.md"]    (character class glob)
-$(whoami) →  ["alice"]           (from subprocess)
-~         →  ["/home/alice"]     (from $HOME)
+$name          →  ["Alice"]                     (from state.variables)
+$1             →  ["arg1"]                      (positional parameter)
+$#             →  ["3"]                         (argument count)
+$*             →  ["a", "b", "c"]               (all arguments)
+$xs[1]         →  ["first"]                     (array index, 1-based)
+$xs[-1]        →  ["last"]                      (negative index from end)
+$xs[2..4]      →  ["b", "c", "d"]               (array slice, inclusive)
+*.txt          →  ["a.txt", "b.txt"]            (from filesystem)
+**/*.zig       →  ["src/main.zig", "src/util.zig"]  (recursive glob)
+[a-z].md       →  ["a.md", "b.md"]              (character class glob)
+$(whoami)      →  ["alice"]                     (from subprocess)
+~              →  ["/home/alice"]               (from $HOME)
+{a,b,c}        →  ["a", "b", "c"]               (explicit list)
+{*.txt}_backup →  ["a.txt_backup", "b.txt_backup"]  (glob + suffix)
+{$items}_test  →  ["x_test", "y_test"]          (variable + suffix)
+{a,b}_{1,2}    →  ["a_1", "a_2", "b_1", "b_2"]  (nested cartesian)
 ```
 
 **List expansion**: A variable holding `["a", "b"]` expands to two separate arguments, not one string with spaces.

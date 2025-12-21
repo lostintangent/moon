@@ -7,7 +7,26 @@
 //! - `WordPart`: A segment of a word token with its quoting context
 //!       (e.g., `hello"world"` produces two WordParts: one unquoted, one double-quoted)
 //!
-//! Note: Unlike most programming languages, keywords (if, for, while, etc.) are
+//! ## Multi-Part Words
+//!
+//! Words can contain multiple parts when quote boundaries are crossed. This enables
+//! Cartesian product expansion with variables and globs:
+//!
+//! - `$items"_suffix"` → expands to `item1_suffix item2_suffix item3_suffix`
+//! - `*.txt"_backup"` → expands to `file1.txt_backup file2.txt_backup`
+//!
+//! Each part tracks its quoting context (`QuoteKind`) so the expander can apply
+//! the correct expansion rules:
+//! - Bare parts: full expansion (variables, globs, escapes)
+//! - Double-quoted: variables and escapes only (globs suppressed)
+//! - Single-quoted: no expansion (literal text)
+//!
+//! Note: Brace expansion syntax (`{pattern}_suffix`) is also supported as an
+//! alternative, more explicit way to achieve Cartesian products. See expand.zig.
+//!
+//! ## Keywords
+//!
+//! Unlike most programming languages, keywords (if, for, while, etc.) are
 //! not a distinct token type. This is because shell keywords are context-sensitive:
 //! `if` in command position starts a conditional, but `echo if` just prints "if".
 //! Additionally, quoting escapes keyword interpretation: `"if"` is always a word.
@@ -29,6 +48,22 @@ pub const QuoteKind = enum {
     single,
 };
 
+/// A segment of a word with its quoting context.
+///
+/// Words are composed of one or more parts when quote boundaries are present.
+/// This enables Cartesian product expansion where each part can have different
+/// expansion behavior based on its quote type.
+///
+/// Examples:
+/// - `hello` → single part: { .quotes = .none, .text = "hello" }
+/// - `"hello"` → single part: { .quotes = .double, .text = "hello" }
+/// - `hello"world"` → two parts:
+///   - { .quotes = .none, .text = "hello" }
+///   - { .quotes = .double, .text = "world" }
+/// - `$var"_suffix"` → two parts enabling Cartesian product:
+///   - { .quotes = .none, .text = "$var" } (expands to list)
+///   - { .quotes = .double, .text = "_suffix" } (literal)
+///   Result: if $var = [a, b] then expansion produces [a_suffix, b_suffix]
 pub const WordPart = struct {
     quotes: QuoteKind,
     text: []const u8,

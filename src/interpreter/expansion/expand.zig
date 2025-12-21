@@ -8,6 +8,7 @@
 //! - Command substitution: `$(cmd)`
 //! - Tilde expansion: `~` → home directory
 //! - Glob patterns: `*.txt`, `**/*.zig`, `[a-z].md`
+//! - Brace expansion: `{*.txt}_backup`, `{a,b,c}`, `{$var}_suffix`
 //! - Escape sequences: `\n`, `\t`, `\$`
 //!
 //! Expansion respects quoting context:
@@ -17,6 +18,12 @@
 //!
 //! List variables expand to multiple arguments (no word-splitting surprises).
 //! For example, if `$xs` is `["a", "b"]`, then `echo $xs` becomes `echo a b`.
+//!
+//! Brace expansion enables Cartesian products with explicit syntax:
+//! - `{*.txt}_backup` → globs `*.txt`, then appends `_backup` to each match
+//! - `{a,b,c}_suffix` → expands to `a_suffix b_suffix c_suffix`
+//! - `{$items}_test` → if `$items` is `[x, y]`, produces `x_test y_test`
+//! - `{a,b}_{1,2}` → nested expansion produces `a_1 a_2 b_1 b_2`
 
 const std = @import("std");
 const token_types = @import("../../language/tokens.zig");
@@ -37,6 +44,8 @@ pub const ExpandError = error{
     InvalidVariableName,
     EmptyCommandSubstitution,
     CommandSubstitutionFailed,
+    UnterminatedBrace,
+    InvalidBraceExpansion,
 };
 
 // =============================================================================
@@ -126,6 +135,14 @@ pub const ExpandContext = struct {
 };
 
 pub fn expandWord(ctx: *ExpandContext, segs: []const WordPart) (ExpandError || std.mem.Allocator.Error)![]const []const u8 {
+    // Check if any bare segment contains brace expansion
+    for (segs) |seg| {
+        if (seg.quotes == .none and hasBraces(seg.text)) {
+            return expandWordWithBraces(ctx, segs);
+        }
+    }
+
+    // Standard multi-part expansion (existing behavior)
     var results: std.ArrayListUnmanaged([]const u8) = .empty;
     try results.append(ctx.allocator, "");
 
@@ -143,6 +160,141 @@ fn expandSegment(ctx: *ExpandContext, seg: WordPart) (ExpandError || std.mem.All
         .double => return expandText(ctx, seg.text, .{ .expand_glob = false }),
         .none => return expandText(ctx, seg.text, .{ .expand_glob = true }),
     }
+}
+
+// =============================================================================
+// Brace Expansion
+// =============================================================================
+
+/// Checks if text contains brace expansion syntax: `{pattern}`
+fn hasBraces(text: []const u8) bool {
+    var depth: usize = 0;
+    for (text) |c| {
+        if (c == '{') {
+            depth += 1;
+        } else if (c == '}') {
+            if (depth > 0) return true; // Found matching brace pair
+            depth = 0;
+        }
+    }
+    return false;
+}
+
+/// Expands a word containing brace patterns.
+/// Handles patterns like: `{*.txt}_backup`, `{a,b,c}`, `prefix_{$var}_suffix`, `{a,b}_{x,y}`
+fn expandWordWithBraces(ctx: *ExpandContext, segs: []const WordPart) (ExpandError || std.mem.Allocator.Error)![]const []const u8 {
+    // Concatenate all segments into one string first
+    var full_text = std.ArrayListUnmanaged(u8){};
+    defer full_text.deinit(ctx.allocator);
+
+    for (segs) |seg| {
+        try full_text.appendSlice(ctx.allocator, seg.text);
+    }
+
+    // Parse into brace parts and literal parts
+    const parts = try parseBraceParts(ctx.allocator, full_text.items);
+    defer ctx.allocator.free(parts);
+
+    // Expand each part and apply cartesian product
+    var results: std.ArrayListUnmanaged([]const u8) = .empty;
+    try results.append(ctx.allocator, "");
+
+    for (parts) |part| {
+        const expanded = if (part.is_brace)
+            try expandBracePattern(ctx, part.text)
+        else
+            try singletonSlice(ctx.allocator, part.text);
+
+        results = try cartesian(ctx.allocator, results.items, expanded);
+    }
+
+    return try results.toOwnedSlice(ctx.allocator);
+}
+
+const BracePart = struct {
+    text: []const u8,
+    is_brace: bool, // true if this is a {pattern}, false if literal
+};
+
+/// Parses text into alternating literal and brace pattern parts.
+/// Example: "prefix_{*.txt}_middle_{a,b}_suffix" →
+///   [{literal, "prefix_"}, {brace, "*.txt"}, {literal, "_middle_"}, {brace, "a,b"}, {literal, "_suffix"}]
+fn parseBraceParts(allocator: std.mem.Allocator, text: []const u8) (ExpandError || std.mem.Allocator.Error)![]BracePart {
+    var parts = std.ArrayListUnmanaged(BracePart){};
+    errdefer parts.deinit(allocator);
+
+    var i: usize = 0;
+    var literal_start: usize = 0;
+
+    while (i < text.len) {
+        if (text[i] == '{') {
+            // Flush any pending literal
+            if (i > literal_start) {
+                try parts.append(allocator, .{ .text = text[literal_start..i], .is_brace = false });
+            }
+
+            // Find matching closing brace
+            const start = i + 1;
+            var depth: usize = 1;
+            i += 1;
+
+            while (i < text.len and depth > 0) {
+                if (text[i] == '{') {
+                    depth += 1;
+                } else if (text[i] == '}') {
+                    depth -= 1;
+                }
+                i += 1;
+            }
+
+            if (depth != 0) {
+                return ExpandError.UnterminatedBrace;
+            }
+
+            // Extract pattern (without the braces)
+            const pattern = text[start .. i - 1];
+            try parts.append(allocator, .{ .text = pattern, .is_brace = true });
+
+            literal_start = i;
+        } else {
+            i += 1;
+        }
+    }
+
+    // Flush remaining literal
+    if (literal_start < text.len) {
+        try parts.append(allocator, .{ .text = text[literal_start..], .is_brace = false });
+    }
+
+    return try parts.toOwnedSlice(allocator);
+}
+
+/// Expands a brace pattern into a list of strings.
+/// Handles: globs (`*.txt`), comma lists (`a,b,c`), variables (`$var`)
+fn expandBracePattern(ctx: *ExpandContext, pattern: []const u8) (ExpandError || std.mem.Allocator.Error)![]const []const u8 {
+    // Check if it's a comma-separated list
+    if (std.mem.indexOfScalar(u8, pattern, ',')) |_| {
+        return expandCommaList(ctx.allocator, pattern);
+    }
+
+    // Otherwise, expand it as normal (globs, variables, etc.)
+    return expandText(ctx, pattern, .{ .expand_glob = true });
+}
+
+/// Expands a comma-separated list: `a,b,c` → `["a", "b", "c"]`
+fn expandCommaList(allocator: std.mem.Allocator, pattern: []const u8) ![]const []const u8 {
+    var items = std.ArrayListUnmanaged([]const u8){};
+    errdefer items.deinit(allocator);
+
+    var iter = std.mem.splitScalar(u8, pattern, ',');
+    while (iter.next()) |item| {
+        const trimmed = std.mem.trim(u8, item, " \t");
+        if (trimmed.len > 0) {
+            try items.append(allocator, trimmed);
+        }
+    }
+
+    return try items.toOwnedSlice(allocator);
 }
 
 const ExpandOptions = struct {
@@ -1001,4 +1153,157 @@ test "array index: zero index returns empty (1-based)" {
 
     try testing.expectEqual(@as(usize, 1), result.len);
     try testing.expectEqualStrings("", result[0]);
+}
+
+// =============================================================================
+// Brace Expansion Tests
+// =============================================================================
+
+test "brace expansion: simple comma list" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var state = State.init(arena.allocator());
+    defer state.deinit();
+    var ctx = ExpandContext.init(arena.allocator(), &state);
+    defer ctx.deinit();
+
+    const segs = [_]WordPart{.{ .quotes = .none, .text = "{a,b,c}" }};
+    const result = try expandWord(&ctx, &segs);
+
+    try testing.expectEqual(@as(usize, 3), result.len);
+    try testing.expectEqualStrings("a", result[0]);
+    try testing.expectEqualStrings("b", result[1]);
+    try testing.expectEqualStrings("c", result[2]);
+}
+
+test "brace expansion: comma list with prefix" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var state = State.init(arena.allocator());
+    defer state.deinit();
+    var ctx = ExpandContext.init(arena.allocator(), &state);
+    defer ctx.deinit();
+
+    const segs = [_]WordPart{.{ .quotes = .none, .text = "prefix_{a,b,c}" }};
+    const result = try expandWord(&ctx, &segs);
+
+    try testing.expectEqual(@as(usize, 3), result.len);
+    try testing.expectEqualStrings("prefix_a", result[0]);
+    try testing.expectEqualStrings("prefix_b", result[1]);
+    try testing.expectEqualStrings("prefix_c", result[2]);
+}
+
+test "brace expansion: comma list with suffix" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var state = State.init(arena.allocator());
+    defer state.deinit();
+    var ctx = ExpandContext.init(arena.allocator(), &state);
+    defer ctx.deinit();
+
+    const segs = [_]WordPart{.{ .quotes = .none, .text = "{a,b,c}_suffix" }};
+    const result = try expandWord(&ctx, &segs);
+
+    try testing.expectEqual(@as(usize, 3), result.len);
+    try testing.expectEqualStrings("a_suffix", result[0]);
+    try testing.expectEqualStrings("b_suffix", result[1]);
+    try testing.expectEqualStrings("c_suffix", result[2]);
+}
+
+test "brace expansion: nested braces cartesian product" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var state = State.init(arena.allocator());
+    defer state.deinit();
+    var ctx = ExpandContext.init(arena.allocator(), &state);
+    defer ctx.deinit();
+
+    const segs = [_]WordPart{.{ .quotes = .none, .text = "{a,b}_{x,y}" }};
+    const result = try expandWord(&ctx, &segs);
+
+    try testing.expectEqual(@as(usize, 4), result.len);
+    try testing.expectEqualStrings("a_x", result[0]);
+    try testing.expectEqualStrings("a_y", result[1]);
+    try testing.expectEqualStrings("b_x", result[2]);
+    try testing.expectEqualStrings("b_y", result[3]);
+}
+
+test "brace expansion: variable inside braces" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var state = State.init(arena.allocator());
+    defer state.deinit();
+    var ctx = ExpandContext.init(arena.allocator(), &state);
+    defer ctx.deinit();
+
+    const values = [_][]const u8{ "x", "y", "z" };
+    try ctx.setVar("items", &values);
+
+    const segs = [_]WordPart{.{ .quotes = .none, .text = "{$items}_suffix" }};
+    const result = try expandWord(&ctx, &segs);
+
+    try testing.expectEqual(@as(usize, 3), result.len);
+    try testing.expectEqualStrings("x_suffix", result[0]);
+    try testing.expectEqualStrings("y_suffix", result[1]);
+    try testing.expectEqualStrings("z_suffix", result[2]);
+}
+
+test "brace expansion: glob pattern with suffix (mocked)" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var state = State.init(arena.allocator());
+    defer state.deinit();
+    var ctx = ExpandContext.init(arena.allocator(), &state);
+    defer ctx.deinit();
+
+    // Mock glob results
+    const matches = [_][]const u8{ "file1.txt", "file2.txt", "file3.txt" };
+    try ctx.setMockGlob("*.txt", &matches);
+
+    const segs = [_]WordPart{.{ .quotes = .none, .text = "{*.txt}_backup" }};
+    const result = try expandWord(&ctx, &segs);
+
+    try testing.expectEqual(@as(usize, 3), result.len);
+    try testing.expectEqualStrings("file1.txt_backup", result[0]);
+    try testing.expectEqualStrings("file2.txt_backup", result[1]);
+    try testing.expectEqualStrings("file3.txt_backup", result[2]);
+}
+
+test "brace expansion: multiple braces with prefix and suffix" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var state = State.init(arena.allocator());
+    defer state.deinit();
+    var ctx = ExpandContext.init(arena.allocator(), &state);
+    defer ctx.deinit();
+
+    const segs = [_]WordPart{.{ .quotes = .none, .text = "test_{a,b}_file_{1,2}.txt" }};
+    const result = try expandWord(&ctx, &segs);
+
+    try testing.expectEqual(@as(usize, 4), result.len);
+    try testing.expectEqualStrings("test_a_file_1.txt", result[0]);
+    try testing.expectEqualStrings("test_a_file_2.txt", result[1]);
+    try testing.expectEqualStrings("test_b_file_1.txt", result[2]);
+    try testing.expectEqualStrings("test_b_file_2.txt", result[3]);
+}
+
+test "brace expansion: works alongside multi-part words" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var state = State.init(arena.allocator());
+    defer state.deinit();
+    var ctx = ExpandContext.init(arena.allocator(), &state);
+    defer ctx.deinit();
+
+    // Multi-part word containing braces in bare part
+    const segs = [_]WordPart{
+        .{ .quotes = .none, .text = "{a,b}" },
+        .{ .quotes = .double, .text = "_suf" },
+    };
+    const result = try expandWord(&ctx, &segs);
+
+    // Braces in bare part triggers brace expansion
+    try testing.expectEqual(@as(usize, 2), result.len);
+    try testing.expectEqualStrings("a_suf", result[0]);
+    try testing.expectEqualStrings("b_suf", result[1]);
 }

@@ -87,6 +87,7 @@ oshen script.wave
 - [Command Substitution](#command-substitution)
 - [Job Control](#job-control)
 - [Glob Patterns](#glob-patterns)
+- [Brace Expansion](#brace-expansion)
 
 ### Reference
 
@@ -786,6 +787,66 @@ echo *.txt                   # Expanded: file1.txt file2.txt ...
 ```
 
 If no files match, the pattern is passed through literally.
+
+## Brace Expansion
+
+Brace expansion provides an explicit syntax for Cartesian products with globs, variables, and literal lists.
+
+### Comma-Separated Lists
+
+```sh
+echo {a,b,c}                 # a b c
+echo prefix_{x,y,z}          # prefix_x prefix_y prefix_z
+echo {hello,goodbye}_world   # hello_world goodbye_world
+```
+
+### Globs with Prefixes/Suffixes
+
+Braces enable you to add literal text to each glob match:
+
+```sh
+{*.txt}_backup               # file1.txt_backup file2.txt_backup ...
+test_{*.zig}                 # test_main.zig test_util.zig ...
+```
+
+Without braces, the entire string is treated as one glob pattern:
+```sh
+*.txt_backup                 # Looks for files matching "*.txt_backup"
+{*.txt}_backup               # Globs *.txt first, then appends _backup
+```
+
+### Variables with Suffixes
+
+Apply literal text to each item in a list variable:
+
+```sh
+var files a.txt b.txt c.txt
+echo {$files}_backup         # a.txt_backup b.txt_backup c.txt_backup
+```
+
+Oshen also supports this with the multi-part word syntax:
+```sh
+echo $files"_backup"         # Same result as above
+```
+
+### Nested Braces (Cartesian Product)
+
+Multiple braces create a cartesian product:
+
+```sh
+{a,b}_{x,y}                  # a_x a_y b_x b_y
+test_{1,2}_file_{A,B}.txt    # test_1_file_A.txt test_1_file_B.txt
+                             # test_2_file_A.txt test_2_file_B.txt
+```
+
+### When to Use Braces
+
+- **Explicit globs with affixes**: `{*.txt}_backup` makes it clear you're appending to glob results
+- **Literal lists**: `{dev,staging,prod}_config.json` is more explicit than other approaches
+- **Nested cartesians**: `{a,b}_{1,2}` clearly shows the multiplicative expansion
+- **Alternative to quotes**: Some prefer `{$var}_suffix` over `$var"_suffix"` for clarity
+
+Both syntaxes work—choose based on readability preference!
 
 ---
 
