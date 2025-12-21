@@ -1,10 +1,16 @@
 //! alias builtin - define command aliases
+//!
+//! Supports:
+//!   alias             - List all aliases
+//!   alias NAME        - Show specific alias
+//!   alias NAME WORDS  - Define alias (words joined with spaces)
+
 const builtins = @import("../builtins.zig");
 
 pub const builtin = builtins.Builtin{
     .name = "alias",
     .run = run,
-    .help = "alias [name [expansion]] - Define or list aliases",
+    .help = "alias [NAME [EXPANSION...]] - Define or list aliases",
 };
 
 fn run(state: *builtins.State, cmd: builtins.ExpandedCmd) u8 {
@@ -29,21 +35,15 @@ fn run(state: *builtins.State, cmd: builtins.ExpandedCmd) u8 {
         return 1;
     }
 
-    // alias NAME EXPANSION: define alias
-    // Join all remaining args as the expansion (allows: alias ll ls -la)
+    // alias NAME EXPANSION...: define alias
     const name = argv[1];
-    const expansion_parts = argv[2..];
-
-    // Join arguments with spaces
-    const expansion = @import("std").mem.join(state.allocator, " ", expansion_parts) catch {
-        builtins.io.printError("alias: allocation failed\n", .{});
-        return 1;
+    const expansion = builtins.joinArgs(state.allocator, argv[2..]) catch {
+        return builtins.reportOOM("alias");
     };
     defer state.allocator.free(expansion);
 
-    state.setAlias(name, expansion) catch |err| {
-        builtins.io.printError("alias: {}\n", .{err});
-        return 1;
+    state.setAlias(name, expansion) catch {
+        return builtins.reportOOM("alias");
     };
 
     return 0;

@@ -1,4 +1,8 @@
 //! Job control: background and stopped job management
+//!
+//! Manages the lifecycle of background (&) and stopped (Ctrl-Z) jobs.
+//! Jobs are tracked in a fixed-size table with unique IDs.
+
 const std = @import("std");
 const io = @import("../terminal/io.zig");
 
@@ -26,7 +30,9 @@ pub const Job = struct {
     status: JobStatus,
 };
 
-/// Maximum number of concurrent jobs
+/// Maximum number of concurrent jobs.
+/// This limit prevents unbounded memory growth while supporting typical
+/// interactive usage (most users have fewer than 10 concurrent jobs).
 const MAX_JOBS = 64;
 
 /// Job table for managing background and stopped jobs
@@ -70,6 +76,8 @@ pub const JobTable = struct {
         const cmd_copy = try self.allocator.dupe(u8, cmd);
 
         const job_id = self.next_id;
+        // Increment with wraparound. Job ID 0 is reserved/invalid,
+        // so we skip it when wrapping from max u16 back to 1.
         self.next_id +%= 1;
         if (self.next_id == 0) self.next_id = 1;
 

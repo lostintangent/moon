@@ -1,21 +1,22 @@
 //! path_prepend builtin - prepend paths to a variable with deduplication
+//!
+//! Prepends new paths to the front of a PATH-style variable,
+//! automatically removing duplicates.
+
 const std = @import("std");
 const builtins = @import("../builtins.zig");
-
-// C setenv function
-extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
 
 pub const builtin = builtins.Builtin{
     .name = "path_prepend",
     .run = run,
-    .help = "path_prepend VAR path... - Prepend paths to a variable (deduplicates)",
+    .help = "path_prepend VAR PATH... - Prepend paths to variable (deduplicates)",
 };
 
 fn run(state: *builtins.State, cmd: builtins.ExpandedCmd) u8 {
     const argv = cmd.argv;
 
     if (argv.len < 3) {
-        builtins.io.writeStderr("path_prepend: usage: path_prepend VAR path...\n");
+        builtins.io.writeStderr("path_prepend: usage: path_prepend VAR PATH...\n");
         return 1;
     }
 
@@ -25,38 +26,42 @@ fn run(state: *builtins.State, cmd: builtins.ExpandedCmd) u8 {
     // Get current value (from exports or environment)
     const current = state.exports.get(var_name) orelse std.posix.getenv(var_name) orelse "";
 
-    // Build new path list: new_paths first, then existing (minus duplicates)
-    var result: std.ArrayListUnmanaged(u8) = .empty;
-    defer result.deinit(state.allocator);
+    // Build deduplicated path list: new paths first, then existing
+    const new_value = buildPathList(state.allocator, new_paths, current) catch {
+        return builtins.reportOOM("path_prepend");
+    };
 
-    var seen: std.StringHashMapUnmanaged(void) = .empty;
-    defer seen.deinit(state.allocator);
-
-    // Add new paths first, then existing paths (deduplicating)
-    appendPaths(state.allocator, &result, &seen, new_paths) catch return oomError();
-    appendPaths(state.allocator, &result, &seen, &.{current}) catch return oomError();
-
-    const new_value = result.toOwnedSlice(state.allocator) catch return oomError();
-
-    // Store in exports map (free old entry if present)
-    if (state.exports.fetchRemove(var_name)) |old| {
-        state.allocator.free(old.key);
-        state.allocator.free(old.value);
-    }
-
-    const key_copy = state.allocator.dupe(u8, var_name) catch return oomError();
-    state.exports.put(key_copy, new_value) catch return oomError();
-
-    // Set in actual environment
-    const name_z = state.allocator.dupeZ(u8, var_name) catch return oomError();
-    defer state.allocator.free(name_z);
-    const value_z = state.allocator.dupeZ(u8, new_value) catch return oomError();
-    defer state.allocator.free(value_z);
-    _ = setenv(name_z, value_z, 1);
+    // Store in exports and environment
+    storeExport(state, var_name, new_value) catch return builtins.reportOOM("path_prepend");
+    builtins.env.set(state.allocator, var_name, new_value) catch return builtins.reportOOM("path_prepend");
 
     return 0;
 }
 
+// =============================================================================
+// Path Building
+// =============================================================================
+
+/// Build a colon-separated path list with deduplication.
+fn buildPathList(
+    allocator: std.mem.Allocator,
+    new_paths: []const []const u8,
+    current: []const u8,
+) ![]const u8 {
+    var result: std.ArrayListUnmanaged(u8) = .empty;
+    defer result.deinit(allocator);
+
+    var seen: std.StringHashMapUnmanaged(void) = .empty;
+    defer seen.deinit(allocator);
+
+    // Add new paths first, then existing paths (deduplicating)
+    try appendPaths(allocator, &result, &seen, new_paths);
+    try appendPaths(allocator, &result, &seen, &.{current});
+
+    return result.toOwnedSlice(allocator);
+}
+
+/// Append paths to result list, skipping duplicates.
 fn appendPaths(
     allocator: std.mem.Allocator,
     result: *std.ArrayListUnmanaged(u8),
@@ -76,7 +81,19 @@ fn appendPaths(
     }
 }
 
-fn oomError() u8 {
-    builtins.io.writeStderr("path_prepend: out of memory\n");
-    return 1;
+// =============================================================================
+// Storage
+// =============================================================================
+
+/// Store an export in state, freeing any old entry.
+fn storeExport(state: *builtins.State, name: []const u8, value: []const u8) !void {
+    if (state.exports.fetchRemove(name)) |old| {
+        state.freeStringEntry(old);
+    }
+
+    const key = try state.allocator.dupe(u8, name);
+    errdefer state.allocator.free(key);
+
+    // Note: value is already allocated by buildPathList, don't dupe
+    try state.exports.put(key, value);
 }

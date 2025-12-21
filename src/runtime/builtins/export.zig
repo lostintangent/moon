@@ -1,14 +1,18 @@
 //! export builtin - export environment variables
+//!
+//! Supports multiple syntax forms:
+//!   export              - List all exports
+//!   export NAME         - Export existing variable
+//!   export NAME VALUE   - Export with value
+//!   export NAME=VALUE   - Export with inline value
+
 const std = @import("std");
 const builtins = @import("../builtins.zig");
-
-// C setenv function
-extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
 
 pub const builtin = builtins.Builtin{
     .name = "export",
     .run = run,
-    .help = "export [name [value]] | [name=value] - Export environment variables",
+    .help = "export [NAME [VALUE]] | [NAME=VALUE...] - Export environment variables",
 };
 
 fn run(state: *builtins.State, cmd: builtins.ExpandedCmd) u8 {
@@ -25,18 +29,15 @@ fn run(state: *builtins.State, cmd: builtins.ExpandedCmd) u8 {
 
     // Check if first arg contains '=' (export foo=bar syntax)
     if (std.mem.indexOfScalar(u8, argv[1], '=') != null) {
-        // Process each argument as name=value
         for (argv[1..]) |arg| {
             const result = exportVar(state, arg, null);
             if (result != 0) return result;
         }
     } else {
-        // export name value syntax (2 args) or export name (1 arg to export existing)
+        // export NAME [VALUE] syntax
         if (argv.len == 2) {
-            // Just name: export existing variable
             return exportVar(state, argv[1], null);
         } else if (argv.len == 3) {
-            // name value: export with separate value
             return exportVar(state, argv[1], argv[2]);
         } else {
             builtins.io.writeStderr("export: too many arguments\n");
@@ -52,7 +53,7 @@ fn exportVar(state: *builtins.State, arg: []const u8, separate_value: ?[]const u
     const eq_pos = std.mem.indexOfScalar(u8, arg, '=');
     const name = if (eq_pos) |pos| arg[0..pos] else arg;
     const value = if (separate_value) |v| v else if (eq_pos) |pos| arg[pos + 1 ..] else blk: {
-        // Just NAME: get existing value
+        // Just NAME: get existing value from shell var or environment
         if (state.getVar(name)) |v| break :blk v;
         if (std.posix.getenv(name)) |v| break :blk v;
         builtins.io.printError("export: {s}: not set\n", .{name});
@@ -61,27 +62,17 @@ fn exportVar(state: *builtins.State, arg: []const u8, separate_value: ?[]const u
 
     // Store in exports map (freeing old entry if exists)
     if (state.exports.fetchRemove(name)) |old| {
-        state.allocator.free(old.key);
-        state.allocator.free(old.value);
+        state.freeStringEntry(old);
     }
 
-    const key_copy = state.allocator.dupe(u8, name) catch return oomError();
-    const val_copy = state.allocator.dupe(u8, value) catch return oomError();
-    state.exports.put(key_copy, val_copy) catch return oomError();
+    const key = state.allocator.dupe(u8, name) catch return builtins.reportOOM("export");
+    const val = state.allocator.dupe(u8, value) catch return builtins.reportOOM("export");
+    state.exports.put(key, val) catch return builtins.reportOOM("export");
 
     // Set in actual environment
-    const name_z = state.allocator.dupeZ(u8, name) catch return oomError();
-    defer state.allocator.free(name_z);
-    const value_z = state.allocator.dupeZ(u8, value) catch return oomError();
-    defer state.allocator.free(value_z);
-    _ = setenv(name_z, value_z, 1);
+    builtins.env.set(state.allocator, name, value) catch return builtins.reportOOM("export");
 
     return 0;
-}
-
-fn oomError() u8 {
-    builtins.io.writeStderr("export: out of memory\n");
-    return 1;
 }
 
 // =============================================================================
@@ -89,16 +80,8 @@ fn oomError() u8 {
 // =============================================================================
 
 const testing = std.testing;
+const test_utils = @import("testing.zig");
 const State = @import("../state.zig").State;
-const expansion_types = @import("../../interpreter/expansion/types.zig");
-
-fn makeCmd(argv: []const []const u8) builtins.ExpandedCmd {
-    return builtins.ExpandedCmd{
-        .argv = argv,
-        .env = &.{},
-        .redirects = &.{},
-    };
-}
 
 test "export: NAME=VALUE syntax" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
@@ -106,7 +89,7 @@ test "export: NAME=VALUE syntax" {
     var state = State.init(arena.allocator());
     defer state.deinit();
 
-    const cmd = makeCmd(&[_][]const u8{ "export", "OSHEN_TEST_VAR=testvalue" });
+    const cmd = test_utils.makeCmd(&[_][]const u8{ "export", "OSHEN_TEST_VAR=testvalue" });
     const result = run(&state, cmd);
     try testing.expectEqual(@as(u8, 0), result);
 
@@ -131,7 +114,7 @@ test "export: existing shell variable" {
     try state.setVar("OSHEN_SHELLVAR", "shellvalue");
 
     // Now export it
-    const cmd = makeCmd(&[_][]const u8{ "export", "OSHEN_SHELLVAR" });
+    const cmd = test_utils.makeCmd(&[_][]const u8{ "export", "OSHEN_SHELLVAR" });
     const result = run(&state, cmd);
     try testing.expectEqual(@as(u8, 0), result);
 
@@ -147,7 +130,7 @@ test "export: nonexistent variable fails" {
     var state = State.init(arena.allocator());
     defer state.deinit();
 
-    const cmd = makeCmd(&[_][]const u8{ "export", "OSHEN_NONEXISTENT_67890" });
+    const cmd = test_utils.makeCmd(&[_][]const u8{ "export", "OSHEN_NONEXISTENT_67890" });
     const result = run(&state, cmd);
     try testing.expectEqual(@as(u8, 1), result);
 }
@@ -158,7 +141,7 @@ test "export: space-separated NAME VALUE syntax" {
     var state = State.init(arena.allocator());
     defer state.deinit();
 
-    const cmd = makeCmd(&[_][]const u8{ "export", "OSHEN_SPACE_VAR", "spacevalue" });
+    const cmd = test_utils.makeCmd(&[_][]const u8{ "export", "OSHEN_SPACE_VAR", "spacevalue" });
     const result = run(&state, cmd);
     try testing.expectEqual(@as(u8, 0), result);
 
@@ -179,7 +162,7 @@ test "export: too many arguments fails" {
     var state = State.init(arena.allocator());
     defer state.deinit();
 
-    const cmd = makeCmd(&[_][]const u8{ "export", "OSHEN_TOO_MANY", "value", "extra" });
+    const cmd = test_utils.makeCmd(&[_][]const u8{ "export", "OSHEN_TOO_MANY", "value", "extra" });
     const result = run(&state, cmd);
     try testing.expectEqual(@as(u8, 1), result);
 }
@@ -190,7 +173,7 @@ test "export: multiple NAME=VALUE pairs" {
     var state = State.init(arena.allocator());
     defer state.deinit();
 
-    const cmd = makeCmd(&[_][]const u8{ "export", "OSHEN_MULTI_A=aval", "OSHEN_MULTI_B=bval" });
+    const cmd = test_utils.makeCmd(&[_][]const u8{ "export", "OSHEN_MULTI_A=aval", "OSHEN_MULTI_B=bval" });
     const result = run(&state, cmd);
     try testing.expectEqual(@as(u8, 0), result);
 

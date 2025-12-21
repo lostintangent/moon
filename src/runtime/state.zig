@@ -1,3 +1,8 @@
+//! Shell runtime state
+//!
+//! Central state management for the shell including variables, exports,
+//! functions, aliases, job control, and working directory.
+
 const std = @import("std");
 const jobs = @import("jobs.zig");
 
@@ -57,10 +62,20 @@ pub const State = struct {
     /// Flag to signal function should return
     fn_return: bool = false,
 
+    // =========================================================================
+    // Memory Management Helpers
+    // =========================================================================
+
     /// Free a variable entry (key and all values in the list)
     fn freeVarEntry(self: *State, entry: std.StringHashMap([]const []const u8).KV) void {
         self.allocator.free(entry.key);
         for (entry.value) |v| self.allocator.free(v);
+        self.allocator.free(entry.value);
+    }
+
+    /// Free an export, function, or alias entry (key-value pair)
+    pub fn freeStringEntry(self: *State, entry: std.StringHashMap([]const u8).KV) void {
+        self.allocator.free(entry.key);
         self.allocator.free(entry.value);
     }
 
@@ -186,10 +201,8 @@ pub const State = struct {
 
     /// Define or redefine a function
     pub fn setFunction(self: *State, name: []const u8, body: []const u8) !void {
-        // Free old entry if it exists
         if (self.functions.fetchRemove(name)) |old| {
-            self.allocator.free(old.key);
-            self.allocator.free(old.value);
+            self.freeStringEntry(old);
         }
 
         const key = try self.allocator.dupe(u8, name);
@@ -207,10 +220,8 @@ pub const State = struct {
 
     /// Define or redefine an alias
     pub fn setAlias(self: *State, name: []const u8, expansion: []const u8) !void {
-        // Free old entry if it exists
         if (self.aliases.fetchRemove(name)) |old| {
-            self.allocator.free(old.key);
-            self.allocator.free(old.value);
+            self.freeStringEntry(old);
         }
 
         const key = try self.allocator.dupe(u8, name);
@@ -224,8 +235,7 @@ pub const State = struct {
     /// Remove an alias
     pub fn unsetAlias(self: *State, name: []const u8) void {
         if (self.aliases.fetchRemove(name)) |old| {
-            self.allocator.free(old.key);
-            self.allocator.free(old.value);
+            self.freeStringEntry(old);
         }
     }
 

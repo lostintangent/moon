@@ -1,4 +1,8 @@
-//! jobs builtin - list background/stopped jobs
+//! jobs builtin - list and select background/stopped jobs
+//!
+//! In interactive mode, displays a TUI for selecting jobs.
+//! In non-interactive mode (pipes, redirects), prints a simple list.
+
 const std = @import("std");
 const builtins = @import("../builtins.zig");
 const tui = @import("../../terminal/tui.zig");
@@ -9,32 +13,28 @@ const runtime_jobs = @import("../jobs.zig");
 pub const builtin = builtins.Builtin{
     .name = "jobs",
     .run = run,
-    .help = "List background and stopped jobs",
+    .help = "jobs - List background and stopped jobs",
 };
 
 fn run(state: *builtins.State, _: builtins.ExpandedCmd) u8 {
-    // Interactive mode only if both stdin and stdout are TTYs
+    // Interactive mode requires TTY on both stdin and stdout
     const stdin_tty = std.posix.isatty(std.posix.STDIN_FILENO);
     const stdout_tty = std.posix.isatty(std.posix.STDOUT_FILENO);
+
     if (state.interactive and stdin_tty and stdout_tty) {
         if (selectJob(state)) |job_id| {
             return exec.continueJobForeground(state, job_id);
         }
-        // User cancelled or no jobs - just return without printing
         return 0;
     }
 
-    // Normal non-interactive output (pipeline, redirect, or non-interactive shell)
+    // Non-interactive: simple list output
     var iter = state.jobs.iter();
     while (iter.next()) |job| {
-        printJobSimple(job);
+        const marker: u8 = if (job.status == .running) '+' else '-';
+        builtins.io.printStdout("[{d}]{c}  {s}  {s}\n", .{ job.id, marker, job.status.str(), job.cmd });
     }
     return 0;
-}
-
-fn printJobSimple(job: *const runtime_jobs.Job) void {
-    const marker: u8 = if (job.status == .running) '+' else '-';
-    builtins.io.printStdout("[{d}]{c}  {s}  {s}\n", .{ job.id, marker, job.status.str(), job.cmd });
 }
 
 fn printJob(job: *const runtime_jobs.Job, highlighted: bool) void {
@@ -44,10 +44,7 @@ fn printJob(job: *const runtime_jobs.Job, highlighted: bool) void {
         builtins.io.printStdout(ansi.bg_dark_gray, .{});
     }
 
-    // Use fixed-width fields for alignment
     builtins.io.printStdout("[{d: >2}]{c}  {s: <7}    {s}", .{ job.id, marker, job.status.str(), job.cmd });
-
-    // Clear to end of line (with background color) then reset
     builtins.io.printStdout(ansi.clear_line_end ++ ansi.reset ++ "\n", .{});
 }
 
@@ -85,7 +82,6 @@ fn selectJob(state: *builtins.State) ?u16 {
         first_frame = false;
 
         for (jobs_list.items, 0..) |job, i| {
-            // Clear line and move to column 1 before printing
             builtins.io.writeStdout("\r\x1b[2K");
             printJob(job, i == selected_index);
         }
@@ -118,7 +114,6 @@ fn selectJob(state: *builtins.State) ?u16 {
     return null;
 }
 
-/// Clear all job lines from the display
 fn clearJobLines(count: usize) void {
     var buf: [16]u8 = undefined;
     const move_up = std.fmt.bufPrint(&buf, "\x1b[{d}A", .{count}) catch return;
@@ -126,6 +121,5 @@ fn clearJobLines(count: usize) void {
     for (0..count) |_| {
         builtins.io.writeStdout("\r\x1b[2K\n");
     }
-    // Move back up to where we started
     builtins.io.writeStdout(move_up);
 }

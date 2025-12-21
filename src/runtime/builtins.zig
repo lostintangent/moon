@@ -1,10 +1,15 @@
 //! Builtin command dispatcher
+//!
+//! Central registry for all shell builtin commands, with compile-time
+//! optimized lookup and shared utilities for builtin implementations.
+
 const std = @import("std");
 
 // Re-export types commonly needed by builtin implementations
 pub const State = @import("state.zig").State;
 pub const ExpandedCmd = @import("../interpreter/expansion/types.zig").ExpandedCmd;
 pub const io = @import("../terminal/io.zig");
+pub const env = @import("env.zig");
 
 /// Standard signature for all builtin commands
 pub const BuiltinFn = *const fn (*State, ExpandedCmd) u8;
@@ -110,4 +115,37 @@ pub fn tryRun(st: *State, cmd: ExpandedCmd) ?u8 {
 /// Check if a command name is a builtin
 pub fn isBuiltin(name: []const u8) bool {
     return builtin_map.has(name);
+}
+
+// =============================================================================
+// Shared Utilities for Builtins
+// =============================================================================
+
+/// Join arguments with spaces into a single allocated string.
+pub fn joinArgs(allocator: std.mem.Allocator, args: []const []const u8) ![]const u8 {
+    if (args.len == 0) return "";
+    if (args.len == 1) return allocator.dupe(u8, args[0]);
+
+    // Calculate total size needed
+    var total: usize = 0;
+    for (args) |arg| total += arg.len;
+    total += args.len - 1; // spaces between args
+
+    const result = try allocator.alloc(u8, total);
+    var pos: usize = 0;
+    for (args, 0..) |arg, i| {
+        @memcpy(result[pos..][0..arg.len], arg);
+        pos += arg.len;
+        if (i < args.len - 1) {
+            result[pos] = ' ';
+            pos += 1;
+        }
+    }
+    return result;
+}
+
+/// Report an out-of-memory error for a builtin command.
+pub fn reportOOM(comptime cmd_name: []const u8) u8 {
+    io.writeStderr(cmd_name ++ ": out of memory\n");
+    return 1;
 }
