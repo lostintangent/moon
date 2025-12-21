@@ -24,7 +24,7 @@ fn run(state: *builtins.State, cmd: builtins.ExpandedCmd) u8 {
     const new_paths = argv[2..];
 
     // Get current value (from exports or environment)
-    const current = state.exports.get(var_name) orelse std.posix.getenv(var_name) orelse "";
+    const current = state.exports.get(var_name) orelse builtins.env.get(var_name) orelse "";
 
     // Build deduplicated path list: new paths first, then existing
     const new_value = buildPathList(state.allocator, new_paths, current) catch {

@@ -55,7 +55,7 @@ fn exportVar(state: *builtins.State, arg: []const u8, separate_value: ?[]const u
     const value = if (separate_value) |v| v else if (eq_pos) |pos| arg[pos + 1 ..] else blk: {
         // Just NAME: get existing value from shell var or environment
         if (state.getVar(name)) |v| break :blk v;
-        if (std.posix.getenv(name)) |v| break :blk v;
+        if (builtins.env.get(name)) |v| break :blk v;
         builtins.io.printError("export: {s}: not set\n", .{name});
         return 1;
     };
@@ -99,7 +99,7 @@ test "export: NAME=VALUE syntax" {
     try testing.expectEqualStrings("testvalue", exported.?);
 
     // Verify it's in the environment
-    const env_value = std.posix.getenv("OSHEN_TEST_VAR");
+    const env_value = builtins.env.get("OSHEN_TEST_VAR");
     try testing.expect(env_value != null);
     try testing.expectEqualStrings("testvalue", env_value.?);
 }
@@ -119,7 +119,7 @@ test "export: existing shell variable" {
     try testing.expectEqual(@as(u8, 0), result);
 
     // Verify it's in the environment
-    const env_value = std.posix.getenv("OSHEN_SHELLVAR");
+    const env_value = builtins.env.get("OSHEN_SHELLVAR");
     try testing.expect(env_value != null);
     try testing.expectEqualStrings("shellvalue", env_value.?);
 }
@@ -151,7 +151,7 @@ test "export: space-separated NAME VALUE syntax" {
     try testing.expectEqualStrings("spacevalue", exported.?);
 
     // Verify it's in the environment
-    const env_value = std.posix.getenv("OSHEN_SPACE_VAR");
+    const env_value = builtins.env.get("OSHEN_SPACE_VAR");
     try testing.expect(env_value != null);
     try testing.expectEqualStrings("spacevalue", env_value.?);
 }
@@ -178,11 +178,11 @@ test "export: multiple NAME=VALUE pairs" {
     try testing.expectEqual(@as(u8, 0), result);
 
     // Verify both are in the environment
-    const env_a = std.posix.getenv("OSHEN_MULTI_A");
+    const env_a = builtins.env.get("OSHEN_MULTI_A");
     try testing.expect(env_a != null);
     try testing.expectEqualStrings("aval", env_a.?);
 
-    const env_b = std.posix.getenv("OSHEN_MULTI_B");
+    const env_b = builtins.env.get("OSHEN_MULTI_B");
     try testing.expect(env_b != null);
     try testing.expectEqualStrings("bval", env_b.?);
 }

@@ -16,6 +16,22 @@ extern "c" fn unsetenv(name: [*:0]const u8) c_int;
 // Public API
 // =============================================================================
 
+/// Get an environment variable value.
+/// This is a thin inline wrapper around std.posix.getenv for consistency.
+pub inline fn get(name: []const u8) ?[]const u8 {
+    return std.posix.getenv(name);
+}
+
+/// Get the HOME directory from the environment.
+pub inline fn getHome() ?[]const u8 {
+    return std.posix.getenv("HOME");
+}
+
+/// Get the PATH environment variable.
+pub inline fn getPath() ?[]const u8 {
+    return std.posix.getenv("PATH");
+}
+
 /// Set an environment variable, allocating null-terminated copies internally.
 pub fn set(allocator: std.mem.Allocator, name: []const u8, value: []const u8) !void {
     const name_z = try allocator.dupeZ(u8, name);

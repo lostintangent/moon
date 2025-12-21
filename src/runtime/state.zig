@@ -5,6 +5,7 @@
 
 const std = @import("std");
 const jobs = @import("jobs.zig");
+const env = @import("env.zig");
 
 pub const JobTable = jobs.JobTable;
 pub const Job = jobs.Job;
@@ -90,7 +91,7 @@ pub const State = struct {
         };
 
         // Initialize HOME from environment
-        if (std.posix.getenv("HOME")) |home| {
+        if (env.getHome()) |home| {
             state.home = home;
         }
 
@@ -148,7 +149,7 @@ pub const State = struct {
             if (list.len > 0) return list[0];
         }
         // Fall back to environment
-        return std.posix.getenv(name);
+        return env.get(name);
     }
 
     /// Get variable as list

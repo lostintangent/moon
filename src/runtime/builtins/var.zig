@@ -41,7 +41,7 @@ fn run(state: *builtins.State, cmd: builtins.ExpandedCmd) u8 {
             }
             builtins.io.writeStdout("\n");
             return 0;
-        } else if (std.posix.getenv(argv[1])) |env_val| {
+        } else if (builtins.env.get(argv[1])) |env_val| {
             builtins.io.printStdout("{s}\n", .{env_val});
             return 0;
         }

@@ -6,6 +6,7 @@
 const std = @import("std");
 const builtins = @import("builtins.zig");
 const State = @import("state.zig").State;
+const env = @import("env.zig");
 
 /// How a command name resolves
 pub const Resolution = union(enum) {
@@ -58,7 +59,7 @@ pub fn findInPath(name: []const u8) ?[]const u8 {
         return name;
     }
 
-    const path_env = std.posix.getenv("PATH") orelse return null;
+    const path_env = env.getPath() orelse return null;
     var path_iter = std.mem.splitScalar(u8, path_env, ':');
 
     // Use a static buffer for the result (valid until next call)

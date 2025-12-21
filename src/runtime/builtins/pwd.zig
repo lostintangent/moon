@@ -26,7 +26,7 @@ fn run(state: *builtins.State, cmd: builtins.ExpandedCmd) u8 {
     };
 
     if (use_tilde) {
-        if (std.posix.getenv("HOME")) |home| {
+        if (builtins.env.getHome()) |home| {
             if (std.mem.startsWith(u8, cwd, home)) {
                 builtins.io.writeStdout("~");
                 builtins.io.writeStdout(cwd[home.len..]);
