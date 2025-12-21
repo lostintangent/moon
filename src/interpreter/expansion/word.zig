@@ -169,11 +169,14 @@ fn expandSegment(ctx: *ExpandContext, seg: WordPart) (ExpandError || std.mem.All
 /// Checks if text contains brace expansion syntax: `{pattern}`
 fn hasBraces(text: []const u8) bool {
     var depth: usize = 0;
-    for (text) |c| {
+    var i: usize = 0;
+    while (i < text.len) : (i += 1) {
+        const c = text[i];
         if (c == '{') {
+            if (i > 0 and text[i - 1] == '$') continue; // Skip ${var} syntax
             depth += 1;
         } else if (c == '}') {
-            if (depth > 0) return true; // Found matching brace pair
+            if (depth > 0) return true;
             depth = 0;
         }
     }
@@ -421,12 +424,24 @@ fn parseAndExpandVar(ctx: *ExpandContext, text: []const u8, start: usize) (Expan
     if (i < text.len and text[i] == '{') {
         i += 1;
         const name_start = i;
-        while (i < text.len and text[i] != '}') : (i += 1) {}
+
+        while (i < text.len and text[i] != '}' and text[i] != '[') : (i += 1) {}
         if (i >= text.len) return ExpandError.UnterminatedVariable;
+
         const name = text[name_start..i];
-        i += 1;
         const values = ctx.getVar(name) orelse try getEnvOrStatus(ctx, name);
-        // Check for indexing after ${var}
+
+        if (i < text.len and text[i] == '[') {
+            const index_result = try applyIndexing(ctx, values, text, i);
+            var close_pos = index_result.new_pos;
+            while (close_pos < text.len and text[close_pos] != '}') : (close_pos += 1) {}
+            if (close_pos >= text.len) return ExpandError.UnterminatedVariable;
+            return .{ .values = index_result.values, .new_pos = close_pos + 1 };
+        }
+
+        if (i >= text.len or text[i] != '}') return ExpandError.UnterminatedVariable;
+        i += 1;
+
         if (i < text.len and text[i] == '[') {
             return try applyIndexing(ctx, values, text, i);
         }

@@ -23,15 +23,14 @@ fn run(state: *builtins.State, cmd: builtins.ExpandedCmd) u8 {
     const var_name = argv[1];
     const new_paths = argv[2..];
 
-    // Get current value (from exports or environment)
-    const current = state.exports.get(var_name) orelse builtins.env.get(var_name) orelse "";
+    const current = state.getVar(var_name) orelse "";
 
-    // Build deduplicated path list: new paths first, then existing
     const new_value = buildPathList(state.allocator, new_paths, current) catch {
         return builtins.reportOOM("path_prepend");
     };
+    defer state.allocator.free(new_value);
 
-    // Store in exports and environment
+    state.setVar(var_name, new_value) catch return builtins.reportOOM("path_prepend");
     storeExport(state, var_name, new_value) catch return builtins.reportOOM("path_prepend");
     builtins.env.set(state.allocator, var_name, new_value) catch return builtins.reportOOM("path_prepend");
 
@@ -94,6 +93,9 @@ fn storeExport(state: *builtins.State, name: []const u8, value: []const u8) !voi
     const key = try state.allocator.dupe(u8, name);
     errdefer state.allocator.free(key);
 
-    // Note: value is already allocated by buildPathList, don't dupe
-    try state.exports.put(key, value);
+    const val = try state.allocator.dupe(u8, value);
+    errdefer state.allocator.free(val);
+
+    try state.exports.put(key, val);
 }
+

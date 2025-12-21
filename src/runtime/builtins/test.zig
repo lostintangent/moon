@@ -116,15 +116,22 @@ fn findMatchingParen(args: []const []const u8) ?usize {
 
 /// Evaluate 3+ argument expressions (binary operators or chained).
 fn evaluateMultiArg(args: []const []const u8) u8 {
-    const result = evalBinary(args[0], args[1], args[2]) orelse {
-        builtins.io.printError("test: too many arguments\n", .{});
-        return 2;
-    };
+    if (args.len >= 3) {
+        if (evalBinary(args[0], args[1], args[2])) |result| {
+            if (args.len == 3) return result;
+            return evaluateBinaryLogical(result, args[3..]);
+        }
+    }
 
-    if (args.len == 3) return result;
+    if (args.len >= 2) {
+        const unary_result = evalUnary(args[0], args[1]);
+        if (unary_result == 2) return 2;
+        if (args.len == 2) return unary_result;
+        return evaluateBinaryLogical(unary_result, args[2..]);
+    }
 
-    // More arguments - check for -a/-o chaining
-    return evaluateBinaryLogical(result, args[3..]);
+    builtins.io.printError("test: too many arguments\n", .{});
+    return 2;
 }
 
 /// Handle -a (and) / -o (or) chaining.
