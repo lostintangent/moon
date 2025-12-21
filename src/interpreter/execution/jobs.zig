@@ -10,8 +10,12 @@ const state_mod = @import("../../runtime/state.zig");
 const State = state_mod.State;
 const io = @import("../../terminal/io.zig");
 
-// POSIX functions not in Zig stdlib
-pub const c = struct {
+// =============================================================================
+// POSIX C Bindings
+// =============================================================================
+
+/// POSIX functions not available in Zig stdlib
+pub const posix = struct {
     pub extern "c" fn getpgrp() std.posix.pid_t;
     pub extern "c" fn setpgid(pid: std.posix.pid_t, pgid: std.posix.pid_t) c_int;
     pub extern "c" fn tcgetpgrp(fd: std.posix.fd_t) std.posix.pid_t;
@@ -25,6 +29,28 @@ pub const c = struct {
     pub const WUNTRACED: c_int = 2;
 };
 
+// =============================================================================
+// Signal Handler Helpers
+// =============================================================================
+
+/// Reset job control signals to default handlers.
+/// Called in child processes before exec to restore normal signal behavior.
+pub fn resetSignalsToDefault() void {
+    const default_act = std.posix.Sigaction{
+        .handler = .{ .handler = std.posix.SIG.DFL },
+        .mask = std.posix.sigemptyset(),
+        .flags = 0,
+    };
+    std.posix.sigaction(std.posix.SIG.TSTP, &default_act, null);
+    std.posix.sigaction(std.posix.SIG.TTIN, &default_act, null);
+    std.posix.sigaction(std.posix.SIG.TTOU, &default_act, null);
+    std.posix.sigaction(std.posix.SIG.CHLD, &default_act, null);
+}
+
+// =============================================================================
+// Global State
+// =============================================================================
+
 /// Global state pointer for SIGCHLD signal handler.
 ///
 /// RATIONALE: POSIX signal handlers have a C ABI constraint that prevents passing
@@ -37,6 +63,10 @@ pub const c = struct {
 /// and from `initJobControl`. The shell is single-threaded, so no synchronization needed.
 var g_state: ?*State = null;
 
+// =============================================================================
+// Public API
+// =============================================================================
+
 /// Initialize job control for interactive shell
 pub fn initJobControl(state: *State) void {
     g_state = state;
@@ -48,20 +78,20 @@ pub fn initJobControl(state: *State) void {
     }
 
     // Get our process group
-    state.shell_pgid = c.getpgrp();
+    state.shell_pgid = posix.getpgrp();
 
     // Make sure we're in the foreground (only if interactive)
     if (state.interactive) {
         // Loop until we're in the foreground
-        while (c.tcgetpgrp(state.terminal_fd) != state.shell_pgid) {
-            _ = c.kill(-state.shell_pgid, std.posix.SIG.TTIN);
+        while (posix.tcgetpgrp(state.terminal_fd) != state.shell_pgid) {
+            _ = posix.kill(-state.shell_pgid, std.posix.SIG.TTIN);
         }
 
         // Put ourselves in our own process group
-        _ = c.setpgid(0, state.shell_pgid);
+        _ = posix.setpgid(0, state.shell_pgid);
 
         // Grab control of terminal
-        _ = c.tcsetpgrp(state.terminal_fd, state.shell_pgid);
+        _ = posix.tcsetpgrp(state.terminal_fd, state.shell_pgid);
     }
 
     // Set up signal handlers
@@ -93,7 +123,7 @@ fn sigchldHandler(_: c_int) callconv(.c) void {
     // Reap all terminated children (non-blocking)
     while (true) {
         var status: u32 = 0;
-        const pid = c.waitpid(-1, &status, c.WNOHANG | c.WUNTRACED);
+        const pid = posix.waitpid(-1, &status, posix.WNOHANG | posix.WUNTRACED);
         if (pid <= 0) break;
 
         // Update job status if we have state
@@ -103,10 +133,14 @@ fn sigchldHandler(_: c_int) callconv(.c) void {
     }
 }
 
+// =============================================================================
+// Wait Helpers
+// =============================================================================
+
 /// Wait for child, also detecting stop signals
 pub fn waitForChildWithStop(pid: std.posix.pid_t) u8 {
     var status: u32 = 0;
-    _ = c.waitpid(pid, &status, c.WUNTRACED);
+    _ = posix.waitpid(pid, &status, posix.WUNTRACED);
 
     if (std.posix.W.IFEXITED(status)) {
         return std.posix.W.EXITSTATUS(status);
@@ -120,6 +154,10 @@ pub fn waitForChildWithStop(pid: std.posix.pid_t) u8 {
     return 1;
 }
 
+// =============================================================================
+// Job Continuation
+// =============================================================================
+
 /// Continue a stopped job in foreground
 pub fn continueJobForeground(state: *State, job_id: u16) u8 {
     const job = state.jobs.get(job_id) orelse {
@@ -132,11 +170,11 @@ pub fn continueJobForeground(state: *State, job_id: u16) u8 {
 
     // Give terminal to job
     if (state.interactive) {
-        _ = c.tcsetpgrp(state.terminal_fd, job.pgid);
+        _ = posix.tcsetpgrp(state.terminal_fd, job.pgid);
     }
 
     // Send SIGCONT
-    _ = c.kill(-job.pgid, std.posix.SIG.CONT);
+    _ = posix.kill(-job.pgid, std.posix.SIG.CONT);
 
     // Wait for job to complete or stop
     var last_status: u8 = 0;
@@ -146,12 +184,12 @@ pub fn continueJobForeground(state: *State, job_id: u16) u8 {
 
     // Take back terminal
     if (state.interactive) {
-        _ = c.tcsetpgrp(state.terminal_fd, state.shell_pgid);
+        _ = posix.tcsetpgrp(state.terminal_fd, state.shell_pgid);
     }
 
     // Check if job stopped again
     var status: u32 = 0;
-    const result = c.waitpid(job.pgid, &status, c.WNOHANG | c.WUNTRACED);
+    const result = posix.waitpid(job.pgid, &status, posix.WNOHANG | posix.WUNTRACED);
     if (result > 0 and std.posix.W.IFSTOPPED(status)) {
         job.status = .stopped;
         io.printStdout("\n[{d}]+  Stopped                 {s}\n", .{ job.id, job.cmd });
@@ -173,7 +211,7 @@ pub fn continueJobBackground(state: *State, job_id: u16) u8 {
     job.status = .running;
 
     // Send SIGCONT
-    _ = c.kill(-job.pgid, std.posix.SIG.CONT);
+    _ = posix.kill(-job.pgid, std.posix.SIG.CONT);
 
     return 0;
 }

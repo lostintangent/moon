@@ -26,13 +26,20 @@ const ExpandedCmd = expansion_types.ExpandedCmd;
 const ExpandedProgram = expansion_types.ExpandedProgram;
 const ExpandedStmt = expansion_types.ExpandedStmt;
 const ExpandedPipeline = expansion_types.ExpandedPipeline;
-const c = jobs.c;
+const posix = jobs.posix;
 
-// Re-export job control functions for external use
+// =============================================================================
+// Re-exports
+// =============================================================================
+
 pub const initJobControl = jobs.initJobControl;
 pub const initSignals = jobs.initSignals;
 pub const continueJobForeground = jobs.continueJobForeground;
 pub const continueJobBackground = jobs.continueJobBackground;
+
+// =============================================================================
+// Public API
+// =============================================================================
 
 /// Execute a command plan
 pub fn execute(allocator: std.mem.Allocator, state: *State, prog: ExpandedProgram, cmd_str: []const u8) !u8 {
@@ -79,6 +86,10 @@ pub fn executeStatement(allocator: std.mem.Allocator, state: *State, stmt: Expan
         },
     };
 }
+
+// =============================================================================
+// Control Flow
+// =============================================================================
 
 /// Execute a shell body string, catching errors and returning a status code.
 /// Used by control flow statements (if, for) to break the error set cycle.
@@ -248,6 +259,10 @@ fn executeWhileStatement(allocator: std.mem.Allocator, state: *State, while_stmt
     return last_status;
 }
 
+// =============================================================================
+// Command Execution
+// =============================================================================
+
 fn executeCmdStatement(allocator: std.mem.Allocator, state: *State, stmt: expansion_types.ExpandedCmdStmt, cmd_str: []const u8) !u8 {
     // For background jobs, we run the pipeline in a process group
     if (stmt.background) {
@@ -343,18 +358,10 @@ fn executeBackgroundJob(allocator: std.mem.Allocator, state: *State, stmt: expan
 
     if (pid == 0) {
         // Child: create new process group with self as leader
-        _ = c.setpgid(0, 0);
+        _ = posix.setpgid(0, 0);
 
         // Reset signal handlers to default in child
-        const default_act = std.posix.Sigaction{
-            .handler = .{ .handler = std.posix.SIG.DFL },
-            .mask = std.posix.sigemptyset(),
-            .flags = 0,
-        };
-        std.posix.sigaction(std.posix.SIG.TSTP, &default_act, null);
-        std.posix.sigaction(std.posix.SIG.TTIN, &default_act, null);
-        std.posix.sigaction(std.posix.SIG.TTOU, &default_act, null);
-        std.posix.sigaction(std.posix.SIG.CHLD, &default_act, null);
+        jobs.resetSignalsToDefault();
 
         // Execute the statement chains
         var last_status: u8 = 0;
@@ -365,7 +372,7 @@ fn executeBackgroundJob(allocator: std.mem.Allocator, state: *State, stmt: expan
     }
 
     // Parent: set process group (race with child doing same)
-    _ = c.setpgid(pid, pid);
+    _ = posix.setpgid(pid, pid);
 
     // Add to job table
     const pids = try allocator.alloc(std.posix.pid_t, 1);
@@ -381,6 +388,10 @@ fn executeBackgroundJob(allocator: std.mem.Allocator, state: *State, stmt: expan
     state.setStatus(0);
     return 0;
 }
+
+// =============================================================================
+// Functions
+// =============================================================================
 
 fn runFunctionWithArgs(allocator: std.mem.Allocator, state: *State, cmd: ExpandedCmd) ?u8 {
     if (cmd.argv.len == 0) return null;

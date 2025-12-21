@@ -17,7 +17,19 @@ const jobs = @import("jobs.zig");
 
 const ExpandedCmd = expansion_types.ExpandedCmd;
 const ExpandedPipeline = expansion_types.ExpandedPipeline;
-const c = jobs.c;
+const posix = jobs.posix;
+
+// =============================================================================
+// Types
+// =============================================================================
+
+/// Function pointer type for trying to run commands as user-defined functions.
+/// Returns exit status if command was a function, null if not a function.
+pub const FunctionExecutor = *const fn (std.mem.Allocator, *State, ExpandedCmd) ?u8;
+
+// =============================================================================
+// Public API
+// =============================================================================
 
 /// Build null-terminated argv array for execvpe
 pub fn buildArgv(allocator: std.mem.Allocator, cmd: ExpandedCmd) !std.ArrayListUnmanaged(?[*:0]const u8) {
@@ -34,7 +46,7 @@ pub fn buildArgv(allocator: std.mem.Allocator, cmd: ExpandedCmd) !std.ArrayListU
 }
 
 /// Execute a pipeline in foreground, checking for aliases, builtins, and functions first
-pub fn executePipelineForeground(allocator: std.mem.Allocator, state: *State, pipeline: ExpandedPipeline, tryRunFunction: *const fn (std.mem.Allocator, *State, ExpandedCmd) ?u8) !u8 {
+pub fn executePipelineForeground(allocator: std.mem.Allocator, state: *State, pipeline: ExpandedPipeline, tryRunFunction: FunctionExecutor) !u8 {
     if (pipeline.commands.len == 0) return 0;
 
     // Single command - check for builtin first, then functions
@@ -86,7 +98,7 @@ fn executeBuiltinWithRedirects(_: std.mem.Allocator, state: *State, cmd: Expande
 }
 
 /// Execute a user-defined function with redirects in a forked child
-fn executeFunctionWithRedirects(allocator: std.mem.Allocator, state: *State, cmd: ExpandedCmd, tryRunFunction: *const fn (std.mem.Allocator, *State, ExpandedCmd) ?u8) !u8 {
+fn executeFunctionWithRedirects(allocator: std.mem.Allocator, state: *State, cmd: ExpandedCmd, tryRunFunction: FunctionExecutor) !u8 {
     const pid = try std.posix.fork();
 
     if (pid == 0) {
@@ -101,8 +113,12 @@ fn executeFunctionWithRedirects(allocator: std.mem.Allocator, state: *State, cmd
     return waitForChild(pid);
 }
 
+// =============================================================================
+// Child Process Execution
+// =============================================================================
+
 /// Execute a pipeline in a child process (no job control needed)
-pub fn executePipelineInChild(allocator: std.mem.Allocator, state: ?*State, pipeline: ExpandedPipeline, tryRunFunction: ?*const fn (std.mem.Allocator, *State, ExpandedCmd) ?u8) !u8 {
+pub fn executePipelineInChild(allocator: std.mem.Allocator, state: ?*State, pipeline: ExpandedPipeline, tryRunFunction: ?FunctionExecutor) !u8 {
     if (pipeline.commands.len == 0) return 0;
 
     // In child, we don't need job control - just execute
@@ -164,7 +180,7 @@ pub fn executePipelineInChild(allocator: std.mem.Allocator, state: ?*State, pipe
     return last_status;
 }
 
-fn executeSingleCommand(allocator: std.mem.Allocator, state: *State, cmd: ExpandedCmd, tryRunFunction: ?*const fn (std.mem.Allocator, *State, ExpandedCmd) ?u8) !u8 {
+fn executeSingleCommand(allocator: std.mem.Allocator, state: *State, cmd: ExpandedCmd, tryRunFunction: ?FunctionExecutor) !u8 {
     if (cmd.argv.len == 0) return 0;
 
     // Builtin fast paths
@@ -193,8 +209,12 @@ fn executeSingleCommand(allocator: std.mem.Allocator, state: *State, cmd: Expand
     return try executeCommandSimple(allocator, cmd);
 }
 
+// =============================================================================
+// Pipeline Orchestration
+// =============================================================================
+
 /// Execute a pipeline with full job control (terminal handling, process groups)
-pub fn executePipelineWithJobControl(allocator: std.mem.Allocator, state: *State, pipeline: ExpandedPipeline, tryRunFunction: *const fn (std.mem.Allocator, *State, ExpandedCmd) ?u8) !u8 {
+pub fn executePipelineWithJobControl(allocator: std.mem.Allocator, state: *State, pipeline: ExpandedPipeline, tryRunFunction: FunctionExecutor) !u8 {
     const n = pipeline.commands.len;
 
     // Create pipes for multi-command pipeline
@@ -227,19 +247,11 @@ pub fn executePipelineWithJobControl(allocator: std.mem.Allocator, state: *State
         if (pid == 0) {
             // Child process
             // Set process group (first child becomes group leader)
-            const child_pgid = if (pgid == 0) c.getpid() else pgid;
-            _ = c.setpgid(0, child_pgid);
+            const child_pgid = if (pgid == 0) posix.getpid() else pgid;
+            _ = posix.setpgid(0, child_pgid);
 
             // Reset signal handlers to default
-            const default_act = std.posix.Sigaction{
-                .handler = .{ .handler = std.posix.SIG.DFL },
-                .mask = std.posix.sigemptyset(),
-                .flags = 0,
-            };
-            std.posix.sigaction(std.posix.SIG.TSTP, &default_act, null);
-            std.posix.sigaction(std.posix.SIG.TTIN, &default_act, null);
-            std.posix.sigaction(std.posix.SIG.TTOU, &default_act, null);
-            std.posix.sigaction(std.posix.SIG.CHLD, &default_act, null);
+            jobs.resetSignalsToDefault();
 
             setupPipeRedirects(stdin_fd, stdout_fd);
 
@@ -253,7 +265,7 @@ pub fn executePipelineWithJobControl(allocator: std.mem.Allocator, state: *State
 
         // Parent: set process group (race with child)
         if (pgid == 0) pgid = pid;
-        _ = c.setpgid(pid, pgid);
+        _ = posix.setpgid(pid, pgid);
 
         try pids.append(allocator, pid);
     }
@@ -267,7 +279,7 @@ pub fn executePipelineWithJobControl(allocator: std.mem.Allocator, state: *State
 
     // Give terminal to the job's process group (foreground only)
     if (state.interactive and pgid != 0) {
-        _ = c.tcsetpgrp(state.terminal_fd, pgid);
+        _ = posix.tcsetpgrp(state.terminal_fd, pgid);
     }
 
     // Wait for all children
@@ -278,11 +290,15 @@ pub fn executePipelineWithJobControl(allocator: std.mem.Allocator, state: *State
 
     // Take back terminal control
     if (state.interactive) {
-        _ = c.tcsetpgrp(state.terminal_fd, state.shell_pgid);
+        _ = posix.tcsetpgrp(state.terminal_fd, state.shell_pgid);
     }
 
     return last_status;
 }
+
+// =============================================================================
+// Simple Execution
+// =============================================================================
 
 /// Execute a single command (fork + exec + wait)
 pub fn executeCommandSimple(allocator: std.mem.Allocator, cmd: ExpandedCmd) !u8 {
@@ -311,13 +327,17 @@ pub fn setupPipeRedirects(stdin_fd: ?std.posix.fd_t, stdout_fd: ?std.posix.fd_t)
     }
 }
 
+// =============================================================================
+// Exec Helpers
+// =============================================================================
+
 /// Execute command in child process (does not return)
 pub fn execCommand(allocator: std.mem.Allocator, cmd: ExpandedCmd) noreturn {
     execCommandWithState(allocator, null, null, cmd);
 }
 
 /// Execute command in child process with optional state for builtins (does not return)
-pub fn execCommandWithState(allocator: std.mem.Allocator, state: ?*State, tryRunFunction: ?*const fn (std.mem.Allocator, *State, ExpandedCmd) ?u8, cmd: ExpandedCmd) noreturn {
+pub fn execCommandWithState(allocator: std.mem.Allocator, state: ?*State, tryRunFunction: ?FunctionExecutor, cmd: ExpandedCmd) noreturn {
     // Apply file redirections
     redirect.apply(cmd.redirects) catch {
         std.posix.exit(1);

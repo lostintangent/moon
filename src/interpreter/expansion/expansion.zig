@@ -1,3 +1,11 @@
+//! AST expansion: transforms parsed statements into expanded form ready for execution.
+//!
+//! This module bridges the parser and executor by expanding AST nodes:
+//! - Command arguments are expanded (variables, globs, command substitution)
+//! - Aliases are resolved
+//! - Redirections are evaluated
+//! - Control flow statements pass through unchanged (expanded at execution time)
+
 const std = @import("std");
 const ast = @import("../../language/ast.zig");
 const expansion_types = @import("types.zig");
@@ -5,6 +13,10 @@ const token_types = @import("../../language/tokens.zig");
 const expand = @import("expand.zig");
 const lexer_mod = @import("../../language/lexer.zig");
 const State = @import("../../runtime/state.zig").State;
+
+// =============================================================================
+// Type Aliases
+// =============================================================================
 
 const Program = ast.Program;
 const Stmt = ast.Statement;
@@ -28,6 +40,10 @@ pub const ExpandError = error{
     EmptyCommand,
     ExpansionError,
 };
+
+// =============================================================================
+// Public API
+// =============================================================================
 
 pub fn expandStatement(allocator: std.mem.Allocator, ctx: *expand.ExpandContext, stmt: Stmt) (ExpandError || expand.ExpandError || std.mem.Allocator.Error)!ExpandedStmt {
     return switch (stmt.kind) {
@@ -101,6 +117,10 @@ pub fn expandStatement(allocator: std.mem.Allocator, ctx: *expand.ExpandContext,
     };
 }
 
+// =============================================================================
+// Internal Expansion Functions
+// =============================================================================
+
 fn expandChain(allocator: std.mem.Allocator, ctx: *expand.ExpandContext, chain: ChainItem) (ExpandError || expand.ExpandError || std.mem.Allocator.Error)!ExpandedChain {
     const pipeline = try expandPipeline(allocator, ctx, chain.pipeline);
 
@@ -149,6 +169,10 @@ fn expandCommand(allocator: std.mem.Allocator, ctx: *expand.ExpandContext, cmd: 
     };
 }
 
+// =============================================================================
+// Alias Expansion
+// =============================================================================
+
 /// Apply alias expansion to the first word of the command, if any.
 /// Expands only once to avoid recursive alias loops.
 fn applyAliasExpansion(allocator: std.mem.Allocator, ctx: *expand.ExpandContext, words: []const []const WordPart) ![]const []const WordPart {
@@ -179,6 +203,10 @@ fn applyAliasExpansion(allocator: std.mem.Allocator, ctx: *expand.ExpandContext,
 
     return try combined.toOwnedSlice(allocator);
 }
+
+// =============================================================================
+// Redirect and Helper Functions
+// =============================================================================
 
 fn expandRedirect(_: std.mem.Allocator, ctx: *expand.ExpandContext, redirect: Redirect) (ExpandError || expand.ExpandError || std.mem.Allocator.Error)!ExpandedRedir {
     return switch (redirect.kind) {

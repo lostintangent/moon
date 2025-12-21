@@ -26,10 +26,12 @@ const expand = @import("expansion/expand.zig");
 const expansion = @import("expansion/expansion.zig");
 const capture = @import("execution/capture.zig");
 
-// C library functions
-const c = struct {
-    extern "c" fn waitpid(pid: std.posix.pid_t, status: ?*c_int, options: c_int) std.posix.pid_t;
-};
+// =============================================================================
+// Constants
+// =============================================================================
+
+/// Maximum file size for script execution (prevents accidental memory exhaustion)
+const MAX_SCRIPT_SIZE: usize = 1024 * 1024; // 1MB
 
 // =============================================================================
 // Types
@@ -172,7 +174,7 @@ pub fn executeFile(allocator: std.mem.Allocator, state: *State, path: []const u8
     const file = try std.fs.cwd().openFile(path, .{});
     defer file.close();
 
-    const content = try file.readToEndAlloc(allocator, 1024 * 1024); // 1MB limit
+    const content = try file.readToEndAlloc(allocator, MAX_SCRIPT_SIZE);
     defer allocator.free(content);
 
     return execute(allocator, state, content);
