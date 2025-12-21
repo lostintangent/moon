@@ -7,15 +7,15 @@
 
 const std = @import("std");
 const ast = @import("language/ast.zig");
-const expansion_types = @import("interpreter/expansion/types.zig");
+const expansion_types = @import("interpreter/expansion/expanded.zig");
 const State = @import("runtime/state.zig").State;
 const builtins = @import("runtime/builtins.zig");
 const var_builtin = @import("runtime/builtins/var.zig");
 const interpreter_mod = @import("interpreter/interpreter.zig");
-const expand = @import("interpreter/expansion/expand.zig");
+const expand = @import("interpreter/expansion/word.zig");
 const lexer = @import("language/lexer.zig");
 const parser = @import("language/parser.zig");
-const expansion = @import("interpreter/expansion/expansion.zig");
+const expansion = @import("interpreter/expansion/statement.zig");
 
 // =============================================================================
 // Test Helpers

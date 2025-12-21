@@ -8,9 +8,9 @@
 
 const std = @import("std");
 const ast = @import("../../language/ast.zig");
-const expansion_types = @import("types.zig");
+const expansion_types = @import("expanded.zig");
 const token_types = @import("../../language/tokens.zig");
-const expand = @import("expand.zig");
+const expand = @import("word.zig");
 const lexer_mod = @import("../../language/lexer.zig");
 const State = @import("../../runtime/state.zig").State;
 

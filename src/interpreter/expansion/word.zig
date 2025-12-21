@@ -1101,7 +1101,7 @@ test "array index: negative range [-2..-1]" {
     try testing.expectEqualStrings("d", result[1]);
 }
 
-test "array index: with braced variable ${xs}[1]" {
+test "array index: with brace expansion {$xs[2]}" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     var state = State.init(arena.allocator());
@@ -1112,7 +1112,7 @@ test "array index: with braced variable ${xs}[1]" {
     const values = [_][]const u8{ "a", "b", "c" };
     try ctx.setVar("xs", &values);
 
-    const segs = [_]WordPart{.{ .quotes = .none, .text = "${xs}[2]" }};
+    const segs = [_]WordPart{.{ .quotes = .none, .text = "{$xs[2]}" }};
     const result = try expandWord(&ctx, &segs);
 
     try testing.expectEqual(@as(usize, 1), result.len);

@@ -7,7 +7,7 @@ const std = @import("std");
 
 // Re-export types commonly needed by builtin implementations
 pub const State = @import("state.zig").State;
-pub const ExpandedCmd = @import("../interpreter/expansion/types.zig").ExpandedCmd;
+pub const ExpandedCmd = @import("../interpreter/expansion/expanded.zig").ExpandedCmd;
 pub const io = @import("../terminal/io.zig");
 pub const env = @import("env.zig");
 

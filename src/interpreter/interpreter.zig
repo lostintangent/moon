@@ -22,8 +22,8 @@ const exec = @import("execution/exec.zig");
 const lexer = @import("../language/lexer.zig");
 const parser = @import("../language/parser.zig");
 const ast_mod = @import("../language/ast.zig");
-const expand = @import("expansion/expand.zig");
-const expansion = @import("expansion/expansion.zig");
+const expand = @import("expansion/word.zig");
+const expansion = @import("expansion/statement.zig");
 const capture = @import("execution/capture.zig");
 
 // =============================================================================

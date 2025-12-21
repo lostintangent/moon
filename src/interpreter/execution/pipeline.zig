@@ -7,7 +7,7 @@
 //! - Waiting for child processes
 
 const std = @import("std");
-const expansion_types = @import("../expansion/types.zig");
+const expansion_types = @import("../expansion/expanded.zig");
 const state_mod = @import("../../runtime/state.zig");
 const State = state_mod.State;
 const builtins = @import("../../runtime/builtins.zig");

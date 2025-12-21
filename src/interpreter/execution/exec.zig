@@ -8,13 +8,13 @@
 //! Pipeline execution and job control are delegated to separate modules.
 
 const std = @import("std");
-const expansion_types = @import("../expansion/types.zig");
+const expansion_types = @import("../expansion/expanded.zig");
 const state_mod = @import("../../runtime/state.zig");
 const State = state_mod.State;
 const builtins = @import("../../runtime/builtins.zig");
 const io = @import("../../terminal/io.zig");
 const interpreter_mod = @import("../interpreter.zig");
-const expand = @import("../expansion/expand.zig");
+const expand = @import("../expansion/word.zig");
 const lexer_mod = @import("../../language/lexer.zig");
 
 // Delegate to specialized modules

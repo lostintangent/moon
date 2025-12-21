@@ -4,7 +4,7 @@
 //! by opening files and using dup2() to redirect standard file descriptors.
 
 const std = @import("std");
-const expansion_types = @import("../expansion/types.zig");
+const expansion_types = @import("../expansion/expanded.zig");
 const io = @import("../../terminal/io.zig");
 
 const ExpandedRedir = expansion_types.ExpandedRedir;
