@@ -15,12 +15,12 @@
 
 const std = @import("std");
 const token_types = @import("tokens.zig");
+
 const Token = token_types.Token;
 const WordPart = token_types.WordPart;
 const QuoteKind = token_types.QuoteKind;
 const TokenSpan = token_types.TokenSpan;
 
-/// Lexical analysis errors.
 pub const LexError = error{
     UnterminatedString,
     UnterminatedCmdSub,
@@ -341,7 +341,6 @@ pub const Lexer = struct {
     // Main tokenization entry point
     // =========================================================================
 
-    /// Tokenizes the input and returns an owned slice of tokens.
     pub fn tokenize(self: *Lexer) (error{OutOfMemory} || LexError)![]Token {
         var tokens: std.ArrayListUnmanaged(Token) = .empty;
 

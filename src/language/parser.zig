@@ -14,6 +14,7 @@
 const std = @import("std");
 const token_types = @import("tokens.zig");
 const ast = @import("ast.zig");
+
 const Token = token_types.Token;
 const TokenSpan = token_types.TokenSpan;
 const WordPart = token_types.WordPart;
@@ -55,6 +56,7 @@ pub const Parser = struct {
     tokens: []const Token,
     pos: usize,
     allocator: std.mem.Allocator,
+
     /// Original input source (needed for capturing function bodies)
     input: []const u8,
 
@@ -87,6 +89,12 @@ pub const Parser = struct {
         return self.tokens[self.pos];
     }
 
+    fn skipSeperators(self: *Parser) void {
+        while (self.isSeperator()) {
+            _ = self.advance();
+        }
+    }
+
     // =========================================================================
     // Token type predicates
     // =========================================================================
@@ -112,7 +120,7 @@ pub const Parser = struct {
     }
 
     /// Returns true if current token is a separator (newline or semicolon).
-    fn isSep(self: *const Parser) bool {
+    fn isSeperator(self: *const Parser) bool {
         const tok = self.peek() orelse return false;
         return tok.kind == .separator;
     }
@@ -134,17 +142,6 @@ pub const Parser = struct {
     /// Returns true if current token starts a block (if, for, while, fun).
     fn isBlockStart(self: *const Parser) bool {
         return self.isOp("if") or self.isOp("for") or self.isOp("while") or self.isOp("fun");
-    }
-
-    // =========================================================================
-    // Separator handling
-    // =========================================================================
-
-    /// Skips any consecutive separator tokens.
-    fn skipSeps(self: *Parser) void {
-        while (self.isSep()) {
-            _ = self.advance();
-        }
     }
 
     // =========================================================================
@@ -319,7 +316,7 @@ pub const Parser = struct {
             if (!token_types.isPipeOperator(tok.kind.operator)) break;
 
             _ = self.advance();
-            self.skipSeps();
+            self.skipSeperators();
             const cmd = try self.parseCommand() orelse return ParseError.UnexpectedEOF;
             try commands.append(self.allocator, cmd);
         }
@@ -338,7 +335,7 @@ pub const Parser = struct {
 
         while (self.tryParseLogicalOp()) |op| {
             _ = self.advance();
-            self.skipSeps();
+            self.skipSeperators();
             const pipeline = try self.parsePipeline() orelse return ParseError.UnexpectedEOF;
             try chains.append(self.allocator, .{ .op = op, .pipeline = pipeline });
         }
@@ -412,7 +409,7 @@ pub const Parser = struct {
     /// Advances past the condition and skips trailing separators.
     fn captureCondition(self: *Parser, terminators: []const []const u8) []const u8 {
         const start = self.pos;
-        while (self.pos < self.tokens.len and !self.isSep()) {
+        while (self.pos < self.tokens.len and !self.isSeperator()) {
             for (terminators) |term| {
                 if (self.isOp(term)) {
                     const result = self.extractSourceRange(start, self.pos);
@@ -422,7 +419,7 @@ pub const Parser = struct {
             _ = self.advance();
         }
         const result = self.extractSourceRange(start, self.pos);
-        self.skipSeps();
+        self.skipSeperators();
         return std.mem.trim(u8, result, " \t\n");
     }
 
@@ -433,7 +430,7 @@ pub const Parser = struct {
     /// Parses a function definition: `fun name ... end`
     fn parseFunctionDefinition(self: *Parser) ParseError!Statement {
         _ = self.advance(); // consume 'fun'
-        self.skipSeps();
+        self.skipSeperators();
 
         // Expect function name (a word)
         if (!self.isWord()) return ParseError.InvalidFunctionName;
@@ -447,7 +444,7 @@ pub const Parser = struct {
             return ParseError.InvalidFunctionName;
         };
 
-        self.skipSeps();
+        self.skipSeperators();
 
         const body = try self.captureBlockBody(&.{}, ParseError.UnterminatedFunction);
         _ = self.advance(); // consume 'end'
@@ -470,7 +467,7 @@ pub const Parser = struct {
         while (self.pos < self.tokens.len) {
             if (self.isOp("else")) {
                 _ = self.advance(); // consume 'else'
-                self.skipSeps();
+                self.skipSeperators();
 
                 if (self.isOp("if")) {
                     // else if - parse another branch
@@ -500,7 +497,7 @@ pub const Parser = struct {
     /// Parses a single if/else-if branch (condition + body).
     /// Expects parser to be positioned after 'if' keyword.
     fn parseIfBranch(self: *Parser) ParseError!IfBranch {
-        self.skipSeps();
+        self.skipSeperators();
 
         const condition = self.captureCondition(&.{ "end", "else" });
         const body = try self.captureBlockBody(&.{"else"}, ParseError.UnterminatedIf);
@@ -511,7 +508,7 @@ pub const Parser = struct {
     /// Parses a for loop: `for var in items... end`
     fn parseForStatement(self: *Parser) ParseError!Statement {
         _ = self.advance(); // consume 'for'
-        self.skipSeps();
+        self.skipSeperators();
 
         // Parse variable name
         if (!self.isWord()) return ParseError.InvalidForLoop;
@@ -524,12 +521,12 @@ pub const Parser = struct {
             return ParseError.InvalidForLoop;
         };
 
-        self.skipSeps();
+        self.skipSeperators();
 
         // Expect 'in' keyword
         if (!self.isOp("in")) return ParseError.InvalidForLoop;
         _ = self.advance(); // consume 'in'
-        self.skipSeps();
+        self.skipSeperators();
 
         // Items: everything until separator (newline or semicolon)
         const items_source = self.captureCondition(&.{"end"});
@@ -546,7 +543,7 @@ pub const Parser = struct {
     /// Parses a while loop: `while condition ... end`
     fn parseWhileStatement(self: *Parser) ParseError!Statement {
         _ = self.advance(); // consume 'while'
-        self.skipSeps();
+        self.skipSeperators();
 
         const condition = self.captureCondition(&.{"end"});
         const body = try self.captureBlockBody(&.{}, ParseError.UnterminatedWhile);
@@ -563,7 +560,7 @@ pub const Parser = struct {
     // =========================================================================
 
     /// Parses a single statement (command, control flow, or function definition).
-    fn parseStmt(self: *Parser) ParseError!?Statement {
+    fn parseStatement(self: *Parser) ParseError!?Statement {
         // Control flow and function definitions
         if (self.isOp("fun")) return try self.parseFunctionDefinition();
         if (self.isOp("if")) return try self.parseIfStatement();
@@ -609,9 +606,9 @@ pub const Parser = struct {
             if (!self.isWord()) return ParseError.InvalidCapture;
 
             const var_tok = self.advance().?;
-            const segs = var_tok.kind.word;
-            if (segs.len == 1 and segs[0].quotes == .none) {
-                capture = .{ .mode = mode, .variable = segs[0].text };
+            const parts = var_tok.kind.word;
+            if (parts.len == 1 and parts[0].quotes == .none) {
+                capture = .{ .mode = mode, .variable = parts[0].text };
             } else {
                 return ParseError.InvalidCapture;
             }
@@ -628,25 +625,23 @@ pub const Parser = struct {
     // Main parsing entry point
     // =========================================================================
 
-    /// Parses the token stream into a Program AST.
     pub fn parse(self: *Parser) ParseError!Program {
-        var stmts: std.ArrayListUnmanaged(Statement) = .empty;
+        var statements: std.ArrayListUnmanaged(Statement) = .empty;
 
-        self.skipSeps();
-
+        self.skipSeperators();
         while (self.pos < self.tokens.len) {
-            self.skipSeps();
+            self.skipSeperators();
             if (self.pos >= self.tokens.len) break;
 
-            if (try self.parseStmt()) |stmt| {
-                try stmts.append(self.allocator, stmt);
+            if (try self.parseStatement()) |stmt| {
+                try statements.append(self.allocator, stmt);
             } else {
                 break;
             }
 
             if (self.pos < self.tokens.len) {
-                if (self.isSep()) {
-                    self.skipSeps();
+                if (self.isSeperator()) {
+                    self.skipSeperators();
                 } else if (self.isOp("&")) {
                     continue;
                 } else {
@@ -655,7 +650,7 @@ pub const Parser = struct {
             }
         }
 
-        return Program{ .statements = try stmts.toOwnedSlice(self.allocator) };
+        return Program{ .statements = try statements.toOwnedSlice(self.allocator) };
     }
 };
 
