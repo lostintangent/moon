@@ -104,7 +104,7 @@ Oshen's interactive mode provides a modern editing experience out of the box—n
 
 Commands, strings, operators, and variables are color-coded as you type:
 
-- **Commands** — Valid commands (builtins and executables) shown in blue
+- **Commands** — Valid commands (builtins, functions, aliases, and executables) shown in bold
 - **Invalid commands** — Unknown commands shown in red
 - **Strings** — Single and double-quoted strings in green
 - **Variables** — `$var` expansions highlighted distinctly
@@ -735,8 +735,8 @@ sleep 30 &                   # Run in background
 
 ```sh
 jobs                         # List all jobs
-fg %1                        # Bring job 1 to foreground
-bg %1                        # Resume stopped job in background
+fg 1                         # Bring job 1 to foreground
+bg 1                         # Resume stopped job in background
 fg                           # Foreground most recent job
 ```
 
@@ -857,14 +857,14 @@ Both syntaxes work—choose based on readability preference!
 | Command | Description |
 |---------|-------------|
 | `alias [name [cmd...]]` | Define or list command aliases |
-| `bg [%n]` | Resume job in background |
+| `bg [n]` | Resume job in background |
 | `cd [dir]` | Change directory (`cd` alone goes home) |
 | `echo [-n] [args...]` | Print arguments (`-n`: no newline, supports `\e` for ESC) |
 | `eval [code...]` | Execute arguments as shell code |
 | `exit [code]` | Exit shell with optional status |
 | `export [name [value]]` \| `[name=value]` | Export to environment |
 | `false` | Return failure (exit 1) |
-| `fg [%n]` | Bring job to foreground |
+| `fg [n]` | Bring job to foreground |
 | `jobs` | List background/stopped jobs |
 | `path_prepend VAR path...` | Prepend paths to a variable (deduplicates) |
 | `pwd [-t]` | Print working directory (`-t`: replace $HOME with ~) |

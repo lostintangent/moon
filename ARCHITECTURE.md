@@ -245,6 +245,26 @@ $1, $#, $*  → single special character
 {*.txt}     → braced glob pattern
 ```
 
+**Two-Phase Expansion**: The expander uses a two-phase design to prevent conflicts between variable indexing (`$xs[2]`) and glob patterns (`file[abc].txt`):
+
+1. **Phase 1 - Text Expansion** (`expandText`): A unified left-to-right character scan that processes:
+   - **Tilde** (`~`) - at word start, expands to home directory
+   - **Variables** (`$var`, `${var}`, `$var[1]`) - when `$` is encountered, parses the variable name AND any indexing syntax, consuming the entire expression including brackets
+   - **Command substitution** (`$(cmd)`) - when `$(` is encountered, executes command and captures output
+   - **Escape sequences** (`\n`, `\t`, `\$`) - when `\` is encountered, interprets escape codes
+   - **Literal text** - everything else between special characters
+
+   All of these are handled in a **single pass**, not separate sub-phases. When `$xs[2]` is encountered, the entire expression including `[2]` is parsed and consumed before moving to the next character.
+
+2. **Phase 2 - Glob Expansion** (`hasGlobChars` + `expandGlob`): Only runs on the **result** of Phase 1. By this point, all `$xs[2]` expressions have been replaced with their values (e.g., `"b"`). Any remaining `[` characters must be glob patterns since all variable-related brackets were already consumed. Glob detection is simple: scan for `*`, `?`, or `[` metacharacters. Only bare (unquoted) words with glob characters trigger filesystem matching.
+
+This sequential design means `$xs[2]_file[abc].txt` works correctly: the `[2]` is consumed during the text expansion pass, while `[abc]` survives to Phase 2 and becomes a glob pattern.
+
+**Quote-aware expansion**: The `expand_glob` flag is controlled by quoting context:
+- Bare words (`*.txt`) → full expansion including globs
+- Double-quoted (`"*.txt"`) → variables expand, globs don't
+- Single-quoted (`'*.txt'`) → no expansion at all, literal text
+
 Expansion results:
 
 ```
