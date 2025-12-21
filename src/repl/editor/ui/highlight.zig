@@ -1,12 +1,19 @@
-//! AST-aware syntax highlighting for the line editor
+//! Highlight: AST-aware syntax highlighting for the line editor.
 //!
 //! Tokenizes and parses input to provide semantic highlighting:
-//! - Valid commands (builtins, aliases, or PATH executables) are bold
-//! - Invalid commands are red
-//! - Keywords are blue
-//! - Strings are green, operators are cyan/yellow/magenta
+//! - Valid commands (builtins, aliases, PATH executables) → bold
+//! - Invalid/unknown commands → red
+//! - Keywords (if, for, while, etc.) → blue
+//! - Quoted strings → green
+//! - Pipe/redirect operators → cyan
+//! - Logical operators (&&, ||) → yellow
+//! - Background operator (&) → magenta
+//!
+//! Uses the lexer and parser from the language module to understand
+//! command structure, enabling accurate command-position detection.
 
 const std = @import("std");
+
 const Lexer = @import("../../../language/lexer.zig").Lexer;
 const Parser = @import("../../../language/parser.zig").Parser;
 const tokens = @import("../../../language/tokens.zig");
@@ -14,7 +21,11 @@ const resolve = @import("../../../runtime/resolve.zig");
 const State = @import("../../../runtime/state.zig").State;
 const ansi = @import("../../../terminal/ansi.zig");
 
-/// Cache for command existence checks (avoids repeated PATH searches)
+// =============================================================================
+// Command cache
+// =============================================================================
+
+/// Cache for command existence checks (avoids repeated PATH searches per render).
 const CommandCache = struct {
     map: std.StringHashMap(bool),
     allocator: std.mem.Allocator,
@@ -36,7 +47,12 @@ const CommandCache = struct {
     }
 };
 
-/// Render highlighted input to a writer
+// =============================================================================
+// Public API
+// =============================================================================
+
+/// Render highlighted input to a writer.
+/// Falls back to plain text on lex/parse errors.
 pub fn render(allocator: std.mem.Allocator, input: []const u8, writer: anytype, state: ?*State) !void {
     if (input.len == 0) return;
 
@@ -163,7 +179,11 @@ pub fn render(allocator: std.mem.Allocator, input: []const u8, writer: anytype, 
     }
 }
 
-/// Get color for an operator
+// =============================================================================
+// Private helpers
+// =============================================================================
+
+/// Get ANSI color code for an operator.
 fn colorForOp(op: []const u8) []const u8 {
     if (op[0] == '|' or op[0] == '>' or op[0] == '<' or
         (op.len >= 2 and op[0] == '2' and op[1] == '>') or

@@ -1,17 +1,28 @@
-//! Core REPL (Read-Eval-Print Loop) logic
+//! REPL: the interactive Read-Eval-Print Loop.
+//!
+//! Orchestrates the main interaction loop:
+//! 1. Display prompt (with git branch, custom prompt function support)
+//! 2. Read input via the line editor (with syntax highlighting, history, completion)
+//! 3. Execute command via the interpreter
+//! 4. Repeat until exit
+//!
+//! The REPL manages terminal mode transitions - raw mode for editing, cooked mode
+//! for command execution - and handles history persistence between sessions.
+
 const std = @import("std");
-const io = @import("../terminal/io.zig");
-const State = @import("../runtime/state.zig").State;
-const prompt = @import("prompt.zig");
-const ansi = @import("../terminal/ansi.zig");
-const tui = @import("../terminal/tui.zig");
-const Editor = @import("editor/editor.zig").Editor;
+
 const lexer = @import("../language/lexer.zig");
 const parser = @import("../language/parser.zig");
 const expand = @import("../interpreter/expansion/expand.zig");
 const expansion = @import("../interpreter/expansion/expansion.zig");
+const State = @import("../runtime/state.zig").State;
+const io = @import("../terminal/io.zig");
+const ansi = @import("../terminal/ansi.zig");
+const tui = @import("../terminal/tui.zig");
+const prompt = @import("prompt.zig");
+const Editor = @import("editor/editor.zig").Editor;
 
-/// History file name
+/// History file name stored in user's home directory.
 const HISTORY_FILE = ".oshen_log";
 
 /// Errors that can occur during command evaluation.

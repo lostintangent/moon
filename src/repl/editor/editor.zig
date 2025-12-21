@@ -1,11 +1,25 @@
-//! Line editor with raw mode terminal handling
+//! Editor: interactive line editor with raw mode terminal handling.
+//!
+//! Provides a readline-like editing experience with:
+//! - Cursor movement (arrows, Home/End, word-by-word with Ctrl+arrows)
+//! - Text manipulation (insert, delete, kill word/line)
+//! - History navigation (up/down arrows, Ctrl+R reverse search)
+//! - Syntax highlighting (via highlight.zig)
+//! - Autosuggestions from history (via suggest.zig)
+//! - Tab completion (via complete.zig)
+//!
+//! The editor operates in raw terminal mode to capture individual keystrokes.
+//! Terminal state is saved on init and restored on deinit or when executing commands.
+
 const std = @import("std");
+
 const history = @import("history.zig");
 const highlight = @import("ui/highlight.zig");
 const suggest = @import("ui/suggest.zig");
 const complete = @import("ui/complete.zig");
-const ansi = @import("../../terminal/ansi.zig");
+const text_utils = @import("../text_utils.zig");
 const State = @import("../../runtime/state.zig").State;
+const ansi = @import("../../terminal/ansi.zig");
 const tui = @import("../../terminal/tui.zig");
 
 const History = history.History;
@@ -13,28 +27,15 @@ const posix = std.posix;
 const Termios = std.posix.termios;
 const system = std.posix.system;
 
-// ============== Word Boundary Helpers ==============
+// Re-export word boundary functions from text_utils for internal use
+const findWordBoundaryLeft = text_utils.findWordBoundaryLeft;
+const findWordBoundaryRight = text_utils.findWordBoundaryRight;
 
-/// Find the position of the previous word boundary (moving left).
-/// Note: Only treats space as a word separator for simplicity.
-fn findWordBoundaryLeft(buf: []const u8, cursor: usize) usize {
-    var pos = cursor;
-    while (pos > 0 and buf[pos - 1] == ' ') pos -= 1;
-    while (pos > 0 and buf[pos - 1] != ' ') pos -= 1;
-    return pos;
-}
+// =============================================================================
+// Terminal I/O
+// =============================================================================
 
-/// Find the position of the next word boundary (moving right).
-/// Note: Only treats space as a word separator for simplicity.
-fn findWordBoundaryRight(buf: []const u8, cursor: usize) usize {
-    var pos = cursor;
-    while (pos < buf.len and buf[pos] != ' ') pos += 1;
-    while (pos < buf.len and buf[pos] == ' ') pos += 1;
-    return pos;
-}
-
-// ============== Terminal I/O ==============
-
+/// Write bytes directly to stdout.
 fn writeToTerminal(bytes: []const u8) !void {
     _ = try posix.write(posix.STDOUT_FILENO, bytes);
 }
@@ -49,7 +50,11 @@ fn getTerminalWidth() ?usize {
     return null;
 }
 
-/// Line editor state
+// =============================================================================
+// Editor
+// =============================================================================
+
+/// Interactive line editor state.
 pub const Editor = struct {
     allocator: std.mem.Allocator,
     /// The line buffer
@@ -629,7 +634,9 @@ pub const Editor = struct {
         try self.refreshLine();
     }
 
-    // ============== Testing ==============
+    // =========================================================================
+    // Test helpers
+    // =========================================================================
 
     fn initForTest(allocator: std.mem.Allocator) Editor {
         return .{
@@ -664,7 +671,9 @@ pub const Editor = struct {
     }
 };
 
-// ============== Unit Tests ==============
+// =============================================================================
+// Tests
+// =============================================================================
 
 test "buffer: insert at end" {
     const allocator = std.testing.allocator;

@@ -1,11 +1,38 @@
-//! Prompt generation for the REPL
+//! Prompt: generates the shell prompt string for the REPL.
+//!
+//! Supports two modes:
+//! 1. Custom prompt - if a `prompt` function is defined, executes it and uses output
+//! 2. Default prompt - shows cwd (with ~ substitution) and optional git branch
+//!
+//! Default format: `<green>~/path</green> <magenta>(branch)</magenta> # `
+
 const std = @import("std");
+
+const text_utils = @import("text_utils.zig");
+const interpreter = @import("../interpreter/interpreter.zig");
 const State = @import("../runtime/state.zig").State;
 const ansi = @import("../terminal/ansi.zig");
-const interpreter = @import("../interpreter/interpreter.zig");
 
-// Prompt suffix
+// =============================================================================
+// Constants
+// =============================================================================
+
+/// Prompt suffix appended after cwd and git branch.
 const suffix = "# ";
+
+/// Buffer segment sizes for prompt building.
+/// The prompt buffer is divided into segments to avoid allocation:
+/// [0..512]      - tilde-contracted path
+/// [512..1024]   - colored cwd prefix
+/// [1024..1536]  - colored git branch suffix
+/// [1536..]      - final assembled prompt
+const PATH_SEGMENT_END = 512;
+const CWD_SEGMENT_END = 1024;
+const BRANCH_SEGMENT_END = 1536;
+
+// =============================================================================
+// Public API
+// =============================================================================
 
 /// Build and return the shell prompt string.
 /// If a `prompt` function is defined, execute it and use its output.
@@ -21,30 +48,37 @@ pub fn build(allocator: std.mem.Allocator, state: *State, buf: []u8) []const u8 
     return buildDefault(allocator, state, buf);
 }
 
+// =============================================================================
+// Private helpers
+// =============================================================================
+
 /// Default prompt: green cwd (with ~ substitution), optional magenta git branch, followed by "# "
 fn buildDefault(allocator: std.mem.Allocator, state: *State, buf: []u8) []const u8 {
     const cwd = state.getCwd() catch "?";
 
-    const display_path = if (state.home) |home| blk: {
-        if (std.mem.startsWith(u8, cwd, home)) {
-            if (cwd.len == home.len) {
-                break :blk "~";
-            } else if (cwd[home.len] == '/') {
-                const subpath = cwd[home.len..];
-                break :blk std.fmt.bufPrint(buf[0..512], "~{s}", .{subpath}) catch cwd;
-            }
-        }
-        break :blk cwd;
-    } else cwd;
+    // Contract home directory to ~ using shared utility
+    const display_path = if (state.home) |home|
+        text_utils.contractTilde(cwd, home, buf[0..PATH_SEGMENT_END])
+    else
+        cwd;
 
-    const cwd_prefix = std.fmt.bufPrint(buf[512..1024], ansi.green ++ "{s}" ++ ansi.reset ++ " ", .{display_path}) catch return suffix;
+    const cwd_prefix = std.fmt.bufPrint(
+        buf[PATH_SEGMENT_END..CWD_SEGMENT_END],
+        ansi.green ++ "{s}" ++ ansi.reset ++ " ",
+        .{display_path},
+    ) catch return suffix;
+
     const branch_suffix = if (getGitBranch(allocator, state)) |git_output| blk: {
         defer allocator.free(git_output);
         const branch = std.mem.trimRight(u8, git_output, "\n\r ");
-        break :blk std.fmt.bufPrint(buf[1024..1280], ansi.magenta ++ "({s})" ++ ansi.reset ++ " ", .{branch}) catch "";
+        break :blk std.fmt.bufPrint(
+            buf[CWD_SEGMENT_END..BRANCH_SEGMENT_END],
+            ansi.magenta ++ "({s})" ++ ansi.reset ++ " ",
+            .{branch},
+        ) catch "";
     } else "";
 
-    return std.fmt.bufPrint(buf[1280..], "{s}{s}" ++ suffix, .{ cwd_prefix, branch_suffix }) catch suffix;
+    return std.fmt.bufPrint(buf[BRANCH_SEGMENT_END..], "{s}{s}" ++ suffix, .{ cwd_prefix, branch_suffix }) catch suffix;
 }
 
 /// Get the current git branch name by calling git CLI

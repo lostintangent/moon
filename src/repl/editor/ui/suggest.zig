@@ -1,9 +1,16 @@
-//! Autosuggestions for the line editor
+//! Suggest: autosuggestions for the line editor.
 //!
-//! Provides suggestions based on command history prefix matching.
+//! Provides fish-style autosuggestions based on command history prefix matching.
+//! As the user types, shows the most recent history entry that starts with
+//! the current input as dimmed text after the cursor.
 
 const std = @import("std");
+
 const History = @import("../history.zig").History;
+
+// =============================================================================
+// Public API
+// =============================================================================
 
 /// Find a suggestion for the given input by searching history.
 /// Returns the suffix to append (not the full suggestion) or null if none found.

@@ -1,10 +1,25 @@
-//! Command history management with file persistence
+//! History: command history management with file persistence.
+//!
+//! Maintains an in-memory list of previously executed commands with:
+//! - Automatic deduplication (consecutive duplicates are ignored)
+//! - Size limiting (oldest entries evicted when capacity reached)
+//! - File persistence (load/save to ~/.oshen_log)
+//! - Search support (for Ctrl+R reverse search)
+
 const std = @import("std");
 
-/// Maximum number of history entries to keep
+// =============================================================================
+// Constants
+// =============================================================================
+
+/// Maximum number of history entries to keep in memory.
 const MAX_HISTORY_SIZE = 100;
 
-/// History manager
+// =============================================================================
+// History
+// =============================================================================
+
+/// History manager for command line entries.
 pub const History = struct {
     allocator: std.mem.Allocator,
     /// History entries (oldest first)
@@ -134,7 +149,10 @@ pub const History = struct {
     }
 };
 
+// =============================================================================
 // Tests
+// =============================================================================
+
 const testing = std.testing;
 
 test "history: add and retrieve" {
