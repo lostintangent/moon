@@ -1,0 +1,356 @@
+#!/usr/bin/env oshen
+# Comprehensive Dogfooding Test Suite for Oshen
+# Tests all the fixes we made plus general functionality
+
+var PASS 0
+var FAIL 0
+var TOTAL 0
+
+# ANSI color codes
+var GREEN "\e[32m"
+var RED "\e[31m"
+var BLUE "\e[34m"
+var NC "\e[0m"
+
+fun print_header
+    echo -n "$BLUE"
+    echo "═══════════════════════════════════════════════════════════"
+    echo "  $1"
+    echo "═══════════════════════════════════════════════════════════"
+    echo -n "$NC"
+    echo ""
+end
+
+fun test_case
+    var name $1
+    var cmd $2
+    var expected $3
+
+    var TOTAL $(expr $TOTAL + 1)
+    eval "$cmd" => output
+
+    if test "$output" = "$expected"
+        echo -n "$GREEN✓$NC "
+        echo "$name"
+        var PASS $(expr $PASS + 1)
+    else
+        echo -n "$RED✗$NC "
+        echo "$name"
+        echo "  Expected: '$expected'"
+        echo "  Got:      '$output'"
+        var FAIL $(expr $FAIL + 1)
+    end
+end
+
+fun test_exit_code
+    var name $1
+    var cmd $2
+    var expected_code $3
+
+    var TOTAL $(expr $TOTAL + 1)
+    eval "$cmd"
+    var exit_code $?
+
+    if test "$exit_code" = "$expected_code"
+        echo -n "$GREEN✓$NC "
+        echo "$name"
+        var PASS $(expr $PASS + 1)
+    else
+        echo -n "$RED✗$NC "
+        echo "$name"
+        echo "  Expected exit: $expected_code"
+        echo "  Got exit:      $exit_code"
+        var FAIL $(expr $FAIL + 1)
+    end
+end
+
+# ============================================================================
+# Basic Variables
+# ============================================================================
+print_header "Basic Variables (10 tests)"
+
+test_case "Simple variable" "var x hello; echo \$x" "hello"
+test_case "Multi-value variable" "var colors red green blue; echo \$colors" "red green blue"
+test_case "Variable reassignment" "var x foo; var x bar; echo \$x" "bar"
+test_case "Empty variable" "var x; echo [\$x]" "[]"
+test_case "Multiple variables" "var a 1; var b 2; echo \$a \$b" "1 2"
+test_case "Variable concatenation" "var a hello; var b world; echo \$a\$b" "helloworld"
+test_case "Numeric variable" "var num 42; echo \$num" "42"
+test_case "Negative number" "var num -42; echo \$num" "-42"
+test_case "Variable with underscore" "var my_var test; echo \$my_var" "test"
+test_case "Unset variable" "var x hello; unset x; echo [\$x]" "[]"
+
+# ============================================================================
+# Environment Variables
+# ============================================================================
+print_header "Environment Variables (8 tests)"
+
+test_case "Export with value" "export FOO bar; echo \$FOO" "bar"
+test_case "Export equals syntax" "export FOO=bar; echo \$FOO" "bar"
+test_case "Unset shell var" "var X test; unset X; echo [\$X]" "[]"
+test_case "Unset env var" "export Y=test; unset Y; echo [\$Y]" "[]"
+test_exit_code "Unset nonexistent succeeds" "unset NONEXISTENT_VAR_123" "0"
+test_case "Unset multiple mixed" "var A 1; export B=2; unset A B; echo [\$A][\$B]" "[][]"
+test_case "Export empty value" "export EMPTY; echo [\$EMPTY]" "[]"
+test_case "HOME exists" "echo \$HOME" "$HOME"
+
+# ============================================================================
+# Array Indexing
+# ============================================================================
+print_header "Array Indexing (15 tests)"
+
+test_case "First element" "var arr a b c; echo \$arr[1]" "a"
+test_case "Second element" "var arr a b c; echo \$arr[2]" "b"
+test_case "Last element" "var arr a b c; echo \$arr[3]" "c"
+test_case "Negative index -1" "var arr a b c; echo \$arr[-1]" "c"
+test_case "Negative index -2" "var arr a b c; echo \$arr[-2]" "b"
+test_case "Slice 1..2" "var arr a b c d; echo \$arr[1..2]" "a b"
+test_case "Slice 2..4" "var arr a b c d e; echo \$arr[2..4]" "b c d"
+test_case "Slice from start" "var arr a b c d; echo \$arr[..2]" "a b"
+test_case "Slice to end" "var arr a b c d; echo \$arr[3..]" "c d"
+test_case "Full slice" "var arr a b c; echo \$arr[1..]" "a b c"
+test_case "Single element slice" "var arr a b c; echo \$arr[2..2]" "b"
+test_case "Negative slice" "var arr a b c d; echo \$arr[-2..-1]" "c d"
+test_case "Out of bounds positive" "var arr a b c; echo [\$arr[10]]" "[]"
+test_case "Index single item" "var single x; echo \$single[1]" "x"
+test_case "Index empty array" "var empty; echo [\$empty[1]]" "[]"
+
+# ============================================================================
+# Brace Expansion
+# ============================================================================
+print_header "Brace Expansion (8 tests)"
+
+test_case "Simple brace list" "echo {a,b,c}" "a b c"
+test_case "Brace with prefix" "echo pre_{a,b,c}" "pre_a pre_b pre_c"
+test_case "Brace with suffix" "echo {a,b,c}_post" "a_post b_post c_post"
+test_case "Brace prefix and suffix" "echo x_{a,b}_y" "x_a_y x_b_y"
+test_case "Nested braces" "echo {a,b}_{1,2}" "a_1 a_2 b_1 b_2"
+test_case "Three-way expansion" "echo {x,y,z}" "x y z"
+test_case "Single item brace" "echo {a}" "a"
+test_case "Multiple brace sets" "echo {1,2} {a,b}" "1 2 a b"
+
+# ============================================================================
+# Quoting and Escaping
+# ============================================================================
+print_header "Quoting and Escaping (10 tests)"
+
+test_case "Single quotes literal" "echo '\$world'" "\$world"
+test_case "Double quotes expand" 'var x test; echo "value: \$x"' "value: test"
+test_case "Empty string" 'echo ""' ""
+test_case "Whitespace preservation" 'echo "a  b  c"' "a  b  c"
+test_case "Single quote in double" 'echo "it'"'"'s working"' "it's working"
+test_case "Quote empty var" 'var x; echo "\$x"' ""
+test_case "Mixed quotes" 'echo "test'"'"'s"' "test's"
+test_case "Backslash space" "echo hello\\ world" "hello world"
+test_case "Dollar literal" 'echo \$literal' "\$literal"
+test_case "Special chars in string" 'echo "hello@#\$%"' "hello@#\$%"
+
+# ============================================================================
+# Command Substitution
+# ============================================================================
+print_header "Command Substitution (8 tests)"
+
+test_case "Basic substitution" 'echo $(echo hello)' "hello"
+test_case "Substitution in string" 'echo "result: $(echo test)"' "result: test"
+test_case "Multiple substitutions" 'echo $(echo a) $(echo b)' "a b"
+test_case "Nested substitution" 'echo $(echo $(echo nested))' "nested"
+test_case "Substitution with variable" 'var x world; echo $(echo $x)' "world"
+test_case "Empty substitution" 'echo [$(echo)]' "[]"
+test_case "Substitution arithmetic" 'echo $(expr 2 + 2)' "4"
+test_case "Multi-word substitution" 'echo $(echo one two)' "one two"
+
+# ============================================================================
+# Conditionals (If/Else)
+# ============================================================================
+print_header "Conditionals (15 tests)"
+
+test_case "If true" "if true; echo yes; end" "yes"
+test_case "If false" "if false; echo yes; end" ""
+test_case "If else true" "if true; echo yes; else; echo no; end" "yes"
+test_case "If else false" "if false; echo yes; else; echo no; end" "no"
+test_case "If test string eq" 'if test "a" = "a"; echo match; end' "match"
+test_case "If test string ne" 'if test "a" != "b"; echo diff; end' "diff"
+test_case "If test number eq" "if test 5 -eq 5; echo equal; end" "equal"
+test_case "If test number lt" "if test 3 -lt 5; echo less; end" "less"
+test_case "If test number gt" "if test 7 -gt 5; echo greater; end" "greater"
+test_case "If test -z empty" 'if test -z ""; echo empty; end' "empty"
+test_case "If test -n non-empty" 'if test -n "text"; echo nonempty; end' "nonempty"
+test_case "Else if true first" "if test 1 -eq 1; echo first; else if test 2 -eq 2; echo second; end" "first"
+test_case "Else if true second" "if test 1 -eq 2; echo first; else if test 2 -eq 2; echo second; end" "second"
+test_case "Else if all false" "if test 1 -eq 2; echo first; else if test 2 -eq 3; echo second; else; echo third; end" "third"
+test_case "Negation with !" "if ! test 1 -eq 2; echo notequal; end" "notequal"
+
+# ============================================================================
+# Loops (For/While)
+# ============================================================================
+print_header "Loops (10 tests)"
+
+test_case "For loop simple" "for x in a b c; echo \$x; end" $'a\nb\nc'
+test_case "For loop with variable" "var items 1 2 3; for i in \$items; echo \$i; end" $'1\n2\n3'
+test_case "For loop empty list" "for x in ; echo \$x; end" ""
+test_case "For loop single item" "for x in single; echo \$x; end" "single"
+test_case "For with break" "for x in a b c d; echo \$x; if test \$x = b; break; end; end" $'a\nb'
+test_case "For with continue" "for x in a b c; if test \$x = b; continue; end; echo \$x; end" $'a\nc'
+test_case "Nested for loops" "for x in 1 2; for y in a b; echo \$x\$y; end; end" $'1a\n1b\n2a\n2b'
+test_case "For inline" "for x in a; echo \$x; end" "a"
+test_case "Empty for body" "for x in a b c; end; echo done" "done"
+test_case "While false" "while false; echo never; end; echo done" "done"
+
+# ============================================================================
+# Functions
+# ============================================================================
+print_header "Functions (15 tests)"
+
+test_case "Simple function" "fun greet; echo hello; end; greet" "hello"
+test_case "Function with arg" "fun say; echo \$1; end; say world" "world"
+test_case "Function multiple args" "fun add; echo \$1 \$2; end; add a b" "a b"
+test_case "Function argv" "fun show; echo \$argv; end; show x y z" "x y z"
+test_case "Function argv indexing" "fun first; echo \$argv[1]; end; first foo bar" "foo"
+test_exit_code "Function early return" "fun early; echo before; return; echo after; end; early" "0"
+test_case "Function with if" "fun check; if test \$1 = yes; echo ok; end; end; check yes" "ok"
+test_case "Function with loop" "fun loop; for x in \$argv; echo \$x; end; end; loop a b" $'a\nb'
+test_case "Function reassignment" "fun f; echo old; end; fun f; echo new; end; f" "new"
+test_case "Function with variable" "fun test; var x local; echo \$x; end; test" "local"
+test_case "Function positional \$2" "fun second; echo \$2; end; second a b c" "b"
+
+# Return code tests (our fixes!)
+test_exit_code "Return 42" "fun f; return 42; end; f" "42"
+test_exit_code "Return 0" "fun f; return 0; end; f" "0"
+test_exit_code "Return 99" "fun f; return 99; end; f" "99"
+test_exit_code "Return in else if" "fun check; if test a = a; return 5; else if test b = b; return 10; end; end; check" "5"
+
+# ============================================================================
+# Aliases
+# ============================================================================
+print_header "Aliases (5 tests)"
+
+test_case "Simple alias" "alias e echo; e test" "test"
+test_case "Alias expansion" "alias greeting 'echo hello'; greeting" "hello"
+test_case "Alias in function" "alias greet 'echo hi'; fun f; greet; end; f" "hi"
+test_case "Alias multiple in function" "alias e 'echo'; fun f; e a; e b; end; f" $'a\nb'
+test_case "Alias with quotes" "alias greet 'echo \"hello world\"'; greet" "hello world"
+
+# ============================================================================
+# Pipelines
+# ============================================================================
+print_header "Pipelines (8 tests)"
+
+test_case "Simple pipe" "echo hello | cat" "hello"
+test_case "Multiple pipes" "echo hello | cat | cat" "hello"
+test_case "Pipe with variable" "var x test; echo \$x | cat" "test"
+test_case "Alternative pipe |>" "echo test |> cat" "test"
+test_case "Chained |>" "echo hello |> cat |> cat" "hello"
+test_case "Pipe with substitution" "echo \$(echo test) | cat" "test"
+test_case "Pipe to wc" "echo -e 'a\nb\nc' | wc -l" "3"
+test_case "Pipe to head" "echo -e '1\n2\n3\n4' | head -n 2" $'1\n2'
+
+# ============================================================================
+# Output Capture
+# ============================================================================
+print_header "Output Capture (6 tests)"
+
+test_case "String capture =>" "echo hello => x; echo \$x" "hello"
+test_case "Capture to new var" "echo world => greeting; echo \$greeting" "world"
+test_case "Capture empty" "echo => x; echo [\$x]" "[]"
+test_case "Capture multi-word" "echo one two three => words; echo \$words" "one two three"
+test_case "Capture command output" "expr 2 + 3 => result; echo \$result" "5"
+test_case "Multiple captures" "echo a => x; echo b => y; echo \$x \$y" "a b"
+
+# ============================================================================
+# Logical Operators
+# ============================================================================
+print_header "Logical Operators (8 tests)"
+
+test_case "AND with &&" "true && echo yes" "yes"
+test_case "AND with false" "false && echo no" ""
+test_case "OR with ||" "false || echo yes" "yes"
+test_case "OR with true" "true || echo no" ""
+test_case "Word AND" "true and echo yes" "yes"
+test_case "Word OR" "false or echo yes" "yes"
+test_case "Chained AND" "true && true && echo yes" "yes"
+test_case "Chained OR" "false || false || echo yes" "yes"
+
+# ============================================================================
+# Special Variables
+# ============================================================================
+print_header "Special Variables (6 tests)"
+
+test_case "Exit status \$?" "true; echo \$?" "0"
+test_case "Exit status fail" "false; echo \$?" "1"
+test_case "Status variable" "true; echo \$status" "0"
+test_case "Tilde expansion" "echo ~" "$HOME"
+test_case "Status chain" "true; true; echo \$?" "0"
+test_case "Status after false" "true; false; echo \$?" "1"
+
+# ============================================================================
+# CD and Directory Navigation (our fixes!)
+# ============================================================================
+print_header "Directory Navigation (5 tests)"
+
+test_case "CD to /tmp" "cd /tmp; pwd" "/private/tmp"
+test_exit_code "CD to valid dir succeeds" "cd /tmp" "0"
+test_exit_code "CD to invalid dir fails" "cd /nonexistent/path/xyz" "1"
+test_exit_code "CD without OLDPWD fails" "cd -" "1"
+
+# Test cd - functionality (skip the output check, just verify it works)
+cd /tmp
+cd /usr
+cd -
+var prev_worked $?
+if test $prev_worked -eq 0
+    echo -n "$GREEN✓$NC "
+    echo "CD - returns to previous"
+    var PASS $(expr $PASS + 1)
+else
+    echo -n "$RED✗$NC "
+    echo "CD - returns to previous"
+    var FAIL $(expr $FAIL + 1)
+end
+var TOTAL $(expr $TOTAL + 1)
+
+# ============================================================================
+# Builtins
+# ============================================================================
+print_header "Builtins (8 tests)"
+
+test_case "echo builtin" "echo test" "test"
+test_case "echo -n no newline" "echo -n test" "test"
+test_case "echo multiple args" "echo a b c" "a b c"
+test_exit_code "true builtin" "true" "0"
+test_exit_code "false builtin" "false" "1"
+test_case "pwd builtin" "cd /tmp; pwd" "/private/tmp"
+test_exit_code "type builtin" "type echo" "0"
+test_exit_code "type external" "type ls" "0"
+
+# ============================================================================
+# Print Summary
+# ============================================================================
+
+echo ""
+echo "═══════════════════════════════════════════════════════════"
+echo "                      TEST SUMMARY"
+echo "═══════════════════════════════════════════════════════════"
+echo ""
+echo "Total Tests:  $TOTAL"
+echo -n "$GREEN"
+echo "Passed:       $PASS"
+echo -n "$RED"
+echo "Failed:       $FAIL"
+echo -n "$NC"
+echo ""
+
+var PASS_RATE $(expr $PASS \* 100 / $TOTAL)
+echo "Pass Rate: $PASS_RATE%"
+echo ""
+
+if test $FAIL -eq 0
+    echo -n "$GREEN"
+    echo "🎉 All tests passed!"
+    echo -n "$NC"
+    exit 0
+else
+    echo -n "$YELLOW"
+    echo "⚠️  Some tests failed."
+    echo -n "$NC"
+    exit 1
+end

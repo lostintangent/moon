@@ -613,15 +613,20 @@ greet Alice                  # Hello, Alice!
 fun hi; echo "Hi there"; end
 ```
 
-Functions receive arguments in `$argv`. Use `return` to exit early with a status code (or omit the argument to use the last command's status):
+Functions receive arguments in `$argv`. Use `return` to exit early with a specific exit code:
 
 ```sh
 fun check_file
     if test ! -f $1
-        return 1
+        return 1        # Exit with status 1 (failure)
     end
     cat $1
+    return 0            # Exit with status 0 (success)
 end
+
+# Check the exit status
+check_file config.txt
+echo $?                 # Prints the return code
 ```
 
 ---
@@ -858,7 +863,7 @@ Both syntaxes work—choose based on readability preference!
 |---------|-------------|
 | `alias [name [cmd...]]` | Define or list command aliases |
 | `bg [n]` | Resume job in background |
-| `cd [dir]` | Change directory (`cd` alone goes home) |
+| `cd [dir]` | Change directory (`cd` alone goes home, `cd -` returns to previous) |
 | `echo [-n] [args...]` | Print arguments (`-n`: no newline, supports `\e` for ESC) |
 | `eval [code...]` | Execute arguments as shell code |
 | `exit [code]` | Exit shell with optional status |
@@ -874,7 +879,7 @@ Both syntaxes work—choose based on readability preference!
 | `true` | Return success (exit 0) |
 | `type <name>...` | Show how a name resolves (alias/builtin/function/external) |
 | `unalias <name>...` | Remove command aliases |
-| `unset <name>...` | Remove shell variables |
+| `unset <name>...` | Remove shell variables and environment variables |
 
 > Note: All builtins support `-h` or `--help` to display usage information.
 

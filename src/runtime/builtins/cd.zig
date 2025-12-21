@@ -9,13 +9,14 @@ pub const builtin = builtins.Builtin{
 };
 
 fn run(state: *builtins.State, cmd: builtins.ExpandedCmd) u8 {
-    const target = if (cmd.argv.len > 1)
-        cmd.argv[1]
-    else
-        state.home orelse {
-            builtins.io.writeStderr("cd: HOME not set\n");
-            return 1;
-        };
+    // Determine target directory
+    const target = if (cmd.argv.len < 2) state.home orelse {
+        builtins.io.writeStderr("cd: HOME not set\n");
+        return 1;
+    } else if (std.mem.eql(u8, cmd.argv[1], "-")) state.prev_cwd orelse {
+        builtins.io.writeStderr("cd: OLDPWD not set\n");
+        return 1;
+    } else cmd.argv[1];
 
     state.chdir(target) catch |err| {
         builtins.io.printError("cd: {s}: {}\n", .{ target, err });

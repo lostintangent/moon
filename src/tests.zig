@@ -734,3 +734,93 @@ test "pipeline: function definition then call" {
     const body = t.state.getFunction("greet");
     try std.testing.expect(body != null);
 }
+
+// =============================================================================
+// Return Statement Tests
+// =============================================================================
+
+test "return: function returns specified exit code" {
+    var t = TestContext.init();
+    t.setup();
+    defer t.deinit();
+
+    const status = try interpreter_mod.execute(t.arena.allocator(), &t.state, "fun myfunc; return 42; end; myfunc");
+    try std.testing.expectEqual(@as(u8, 42), status);
+}
+
+test "return: zero exit code" {
+    var t = TestContext.init();
+    t.setup();
+    defer t.deinit();
+
+    const status = try interpreter_mod.execute(t.arena.allocator(), &t.state, "fun check; return 0; end; check");
+    try std.testing.expectEqual(@as(u8, 0), status);
+}
+
+test "return: in else if branch" {
+    var t = TestContext.init();
+    t.setup();
+    defer t.deinit();
+
+    const input =
+        \\fun check
+        \\  if test a = b
+        \\    return 1
+        \\  else if test b = b
+        \\    return 2
+        \\  else
+        \\    return 3
+        \\  end
+        \\end
+        \\check
+    ;
+
+    const status = try interpreter_mod.execute(t.arena.allocator(), &t.state, input);
+    try std.testing.expectEqual(@as(u8, 2), status);
+}
+
+// =============================================================================
+// Environment Variable Tests
+// =============================================================================
+
+test "env: unset removes environment variables" {
+    var t = TestContext.init();
+    t.setup();
+    defer t.deinit();
+
+    const env = @import("runtime/env.zig");
+    try env.set(t.arena.allocator(), "TEST_UNSET_VAR", "testvalue");
+
+    const before = env.get("TEST_UNSET_VAR");
+    try std.testing.expect(before != null);
+
+    try env.unset(t.arena.allocator(), "TEST_UNSET_VAR");
+
+    const after = env.get("TEST_UNSET_VAR");
+    try std.testing.expectEqual(@as(?[]const u8, null), after);
+}
+
+// =============================================================================
+// Directory Navigation Tests
+// =============================================================================
+
+test "cd: dash returns to previous directory" {
+    var state = State.init(std.testing.allocator);
+    defer state.deinit();
+
+    try std.testing.expectEqual(@as(?[]const u8, null), state.prev_cwd);
+
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const original_dir = try std.posix.getcwd(&buf);
+
+    try state.chdir("/tmp");
+
+    try std.testing.expect(state.prev_cwd != null);
+    try std.testing.expect(std.mem.indexOf(u8, state.prev_cwd.?, original_dir) != null or
+        std.mem.indexOf(u8, original_dir, state.prev_cwd.?) != null);
+
+    try state.chdir(original_dir);
+
+    try std.testing.expect(state.prev_cwd != null);
+    try std.testing.expect(std.mem.indexOf(u8, state.prev_cwd.?, "tmp") != null);
+}

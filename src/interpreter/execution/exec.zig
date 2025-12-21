@@ -431,6 +431,15 @@ fn executeBackgroundJob(allocator: std.mem.Allocator, state: *State, stmt: expan
 // Functions
 // =============================================================================
 
+/// Restore $argv to its previous value or unset it
+fn restoreArgv(state: *State, old_argv: ?[]const []const u8) void {
+    if (old_argv) |v| {
+        state.setVarList("argv", v) catch {};
+    } else {
+        state.unsetVar("argv");
+    }
+}
+
 fn runFunctionWithArgs(allocator: std.mem.Allocator, state: *State, cmd: ExpandedCmd) ?u8 {
     if (cmd.argv.len == 0) return null;
 
@@ -451,29 +460,19 @@ fn runFunctionWithArgs(allocator: std.mem.Allocator, state: *State, cmd: Expande
     // Execute the function body, catching errors and converting to status
     const status = interpreter_mod.execute(allocator, state, body) catch |err| {
         io.printError("function {s}: {}\n", .{ name, err });
-        // Restore $argv before returning error status
-        if (old_argv) |v| {
-            state.setVarList("argv", v) catch {};
-        } else {
-            state.unsetVar("argv");
-        }
+        restoreArgv(state, old_argv);
         state.fn_return = false;
         return 1;
     };
 
-    // Handle return statement - status is already set, just reset the flag
-    if (state.fn_return) {
+    // If fn_return is set, use state.status (set by return statement), otherwise use last command status
+    const return_status = if (state.fn_return) blk: {
         state.fn_return = false;
-    }
+        break :blk state.status;
+    } else status;
 
-    // Restore $argv
-    if (old_argv) |v| {
-        state.setVarList("argv", v) catch {};
-    } else {
-        state.unsetVar("argv");
-    }
-
-    return status;
+    restoreArgv(state, old_argv);
+    return return_status;
 }
 
 /// Try to execute a user-defined function.

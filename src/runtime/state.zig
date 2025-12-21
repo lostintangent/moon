@@ -33,6 +33,9 @@ pub const State = struct {
     /// Current working directory (cached)
     cwd: ?[]const u8 = null,
 
+    /// Previous working directory (for `cd -`)
+    prev_cwd: ?[]const u8 = null,
+
     /// Home directory
     home: ?[]const u8 = null,
 
@@ -136,6 +139,10 @@ pub const State = struct {
 
         if (self.cwd) |cwd| {
             self.allocator.free(cwd);
+        }
+
+        if (self.prev_cwd) |prev| {
+            self.allocator.free(prev);
         }
 
         // Clean up jobs
@@ -255,14 +262,26 @@ pub const State = struct {
         return self.cwd.?;
     }
 
-    /// Change directory
+    /// Change directory and update prev_cwd
     pub fn chdir(self: *State, path: []const u8) !void {
+        // Get current directory before changing (to save as prev_cwd)
+        const old_cwd = self.getCwd() catch null;
+
+        // Change to the new directory
         try std.posix.chdir(path);
-        // Invalidate cached cwd
-        if (self.cwd) |cwd| {
-            self.allocator.free(cwd);
-            self.cwd = null;
+
+        // Save old directory as prev_cwd after successful change
+        if (old_cwd) |old| {
+            // Free existing prev_cwd if any
+            if (self.prev_cwd) |prev| {
+                self.allocator.free(prev);
+            }
+            // Move the old cwd to prev_cwd (it's already allocated)
+            self.prev_cwd = old;
         }
+
+        // Invalidate cached cwd since we changed directories
+        self.cwd = null;
     }
 };
 
