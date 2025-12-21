@@ -29,7 +29,6 @@ const CaptureMode = ast.CaptureMode;
 
 const ExpandedProgram = expansion_types.ExpandedProgram;
 const ExpandedStmt = expansion_types.ExpandedStmt;
-const ExpandedChain = expansion_types.ExpandedChain;
 const ExpandedPipeline = expansion_types.ExpandedPipeline;
 const ExpandedCmd = expansion_types.ExpandedCmd;
 const ExpandedRedir = expansion_types.ExpandedRedir;
@@ -48,11 +47,11 @@ pub const ExpandError = error{
 pub fn expandStatement(allocator: std.mem.Allocator, ctx: *expand.ExpandContext, stmt: Stmt) (ExpandError || expand.ExpandError || std.mem.Allocator.Error)!ExpandedStmt {
     return switch (stmt.kind) {
         .command => |cmd_stmt| blk: {
-            var chain_expanded: std.ArrayListUnmanaged(ExpandedChain) = .empty;
+            // Store chains unexpanded - they'll be expanded at execution time
+            var chains_unexpanded: std.ArrayListUnmanaged(ast.ChainItem) = .empty;
 
             for (cmd_stmt.chains) |chain| {
-                const expanded_result = try expandChain(allocator, ctx, chain);
-                try chain_expanded.append(allocator, expanded_result);
+                try chains_unexpanded.append(allocator, chain);
             }
 
             var capture_expanded: ?Capture = null;
@@ -65,10 +64,10 @@ pub fn expandStatement(allocator: std.mem.Allocator, ctx: *expand.ExpandContext,
             }
 
             break :blk ExpandedStmt{
-                .kind = .{ .command = expansion_types.ExpandedCmdStmt{
+                .kind = .{ .command = ast.CommandStatement{
+                    .chains = try chains_unexpanded.toOwnedSlice(allocator),
                     .background = cmd_stmt.background,
                     .capture = capture_expanded,
-                    .chains = try chain_expanded.toOwnedSlice(allocator),
                 } },
             };
         },
@@ -121,16 +120,8 @@ pub fn expandStatement(allocator: std.mem.Allocator, ctx: *expand.ExpandContext,
 // Internal Expansion Functions
 // =============================================================================
 
-fn expandChain(allocator: std.mem.Allocator, ctx: *expand.ExpandContext, chain: ChainItem) (ExpandError || expand.ExpandError || std.mem.Allocator.Error)!ExpandedChain {
-    const pipeline = try expandPipeline(allocator, ctx, chain.pipeline);
-
-    return ExpandedChain{
-        .op = chain.op,
-        .pipeline = pipeline,
-    };
-}
-
-fn expandPipeline(allocator: std.mem.Allocator, ctx: *expand.ExpandContext, pipeline: Pipeline) (ExpandError || expand.ExpandError || std.mem.Allocator.Error)!ExpandedPipeline {
+// Made public for JIT expansion during execution
+pub fn expandPipeline(allocator: std.mem.Allocator, ctx: *expand.ExpandContext, pipeline: Pipeline) (ExpandError || expand.ExpandError || std.mem.Allocator.Error)!ExpandedPipeline {
     var cmd_expanded: std.ArrayListUnmanaged(ExpandedCmd) = .empty;
 
     for (pipeline.commands) |cmd| {
@@ -287,7 +278,10 @@ test "simple command" {
     const prog_expanded = try expandInput(arena.allocator(), &ctx, "echo hello world");
 
     try testing.expectEqual(@as(usize, 1), prog_expanded.statements.len);
-    const cmd_expanded = prog_expanded.statements[0].kind.command.chains[0].pipeline.commands[0];
+    // Chains are now stored unexpanded, so we need to expand them
+    const ast_pipeline = prog_expanded.statements[0].kind.command.chains[0].pipeline;
+    const expanded_pipeline = try expandPipeline(arena.allocator(), &ctx, ast_pipeline);
+    const cmd_expanded = expanded_pipeline.commands[0];
     try testing.expectEqual(@as(usize, 3), cmd_expanded.argv.len);
     try testing.expectEqualStrings("echo", cmd_expanded.argv[0]);
     try testing.expectEqualStrings("hello", cmd_expanded.argv[1]);
@@ -321,7 +315,10 @@ test "with variable expansion" {
 
     const prog_expanded = try expandInput(arena.allocator(), &ctx, "echo $name");
 
-    const cmd_expanded = prog_expanded.statements[0].kind.command.chains[0].pipeline.commands[0];
+    // Chains are now stored unexpanded, so we need to expand them
+    const ast_pipeline = prog_expanded.statements[0].kind.command.chains[0].pipeline;
+    const expanded_pipeline = try expandPipeline(arena.allocator(), &ctx, ast_pipeline);
+    const cmd_expanded = expanded_pipeline.commands[0];
     try testing.expectEqual(@as(usize, 2), cmd_expanded.argv.len);
     try testing.expectEqualStrings("echo", cmd_expanded.argv[0]);
     try testing.expectEqualStrings("world", cmd_expanded.argv[1]);
@@ -337,7 +334,10 @@ test "with env prefix" {
 
     const prog_expanded = try expandInput(arena.allocator(), &ctx, "FOO=bar env");
 
-    const cmd_expanded = prog_expanded.statements[0].kind.command.chains[0].pipeline.commands[0];
+    // Chains are now stored unexpanded, so we need to expand them
+    const ast_pipeline = prog_expanded.statements[0].kind.command.chains[0].pipeline;
+    const expanded_pipeline = try expandPipeline(arena.allocator(), &ctx, ast_pipeline);
+    const cmd_expanded = expanded_pipeline.commands[0];
     try testing.expectEqual(@as(usize, 1), cmd_expanded.env.len);
     try testing.expectEqualStrings("FOO", cmd_expanded.env[0].key);
     try testing.expectEqualStrings("bar", cmd_expanded.env[0].value);

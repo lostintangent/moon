@@ -14,7 +14,6 @@
 //!   - ExpandedRedir - parses ">" into structured {fd, kind, path}
 //!   - ExpandedCmd - expands $vars, globs, ~, $(cmd) into flat argv
 //!   - EnvKV - expands assignment values
-//!   - ExpandedChain - normalizes && to "and", || to "or"
 
 pub const ast = @import("../../language/ast.zig");
 
@@ -84,24 +83,12 @@ pub const ExpandedPipeline = struct {
     commands: []const ExpandedCmd,
 };
 
-pub const ExpandedChain = struct {
-    op: ast.ChainOperator,
-    pipeline: ExpandedPipeline,
-};
-
-/// Command statement
-pub const ExpandedCmdStmt = struct {
-    background: bool,
-    capture: ?Capture,
-    chains: []const ExpandedChain,
-};
-
 // =============================================================================
 // Statement wrapper (mirrors AST structure)
 // =============================================================================
 
 pub const ExpandedStmtKind = union(enum) {
-    command: ExpandedCmdStmt,
+    command: ast.CommandStatement,
     function: ast.FunctionDefinition,
     @"if": ast.IfStatement,
     @"for": ast.ForStatement,

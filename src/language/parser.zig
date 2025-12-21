@@ -357,7 +357,18 @@ pub const Parser = struct {
 
         while (self.pos < self.tokens.len) {
             if (self.isBlockStart()) {
-                depth += 1;
+                // Check if this is "else if" - don't increment depth since it's part of the same if statement
+                const is_else_if = blk: {
+                    if (!self.isOp("if") or self.pos == 0) break :blk false;
+                    const prev_tok = self.tokens[self.pos - 1];
+                    break :blk prev_tok.kind == .word and
+                           prev_tok.kind.word.len == 1 and
+                           prev_tok.kind.word[0].quotes == .none and
+                           std.mem.eql(u8, prev_tok.kind.word[0].text, "else");
+                };
+                if (!is_else_if) {
+                    depth += 1;
+                }
                 _ = self.advance();
             } else if (self.isOp("end")) {
                 depth -= 1;

@@ -609,8 +609,8 @@ end
 
 greet Alice                  # Hello, Alice!
 
-# Inline definition
-fun hi echo "Hi there" end
+# Inline definition (single statement)
+fun hi; echo "Hi there"; end
 ```
 
 Functions receive arguments in `$argv`. Use `return` to exit early with a status code (or omit the argument to use the last command's status):

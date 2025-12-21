@@ -22,10 +22,12 @@ fn run(state: *builtins.State, cmd: builtins.ExpandedCmd) u8 {
         return 1;
     };
 
-    // Emit OSC 7 to notify terminal of new working directory
-    if (state.getCwd()) |cwd| {
-        tui.emitOsc7(cwd);
-    } else |_| {}
+    // Emit OSC 7 to notify terminal of new working directory (only in interactive mode)
+    if (state.interactive) {
+        if (state.getCwd() catch null) |cwd| {
+            tui.emitOsc7(cwd);
+        }
+    }
 
     return 0;
 }

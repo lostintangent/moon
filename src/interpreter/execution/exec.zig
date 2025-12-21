@@ -16,6 +16,8 @@ const io = @import("../../terminal/io.zig");
 const interpreter_mod = @import("../interpreter.zig");
 const expand = @import("../expansion/word.zig");
 const lexer_mod = @import("../../language/lexer.zig");
+const expansion = @import("../expansion/word.zig");
+const expansion_statement = @import("../expansion/statement.zig");
 
 // Delegate to specialized modules
 const jobs = @import("jobs.zig");
@@ -263,7 +265,7 @@ fn executeWhileStatement(allocator: std.mem.Allocator, state: *State, while_stmt
 // Command Execution
 // =============================================================================
 
-fn executeCmdStatement(allocator: std.mem.Allocator, state: *State, stmt: expansion_types.ExpandedCmdStmt, cmd_str: []const u8) !u8 {
+fn executeCmdStatement(allocator: std.mem.Allocator, state: *State, stmt: expansion_types.ast.CommandStatement, cmd_str: []const u8) !u8 {
     // For background jobs, we run the pipeline in a process group
     if (stmt.background) {
         return executeBackgroundJob(allocator, state, stmt, cmd_str);
@@ -295,23 +297,56 @@ fn executeCmdStatement(allocator: std.mem.Allocator, state: *State, stmt: expans
             continue;
         }
 
-        last_status = try pipeline.executePipelineForeground(allocator, state, chain.pipeline, &tryRunFunction);
+        // Expand pipeline with current state/cwd
+        const expanded_pipeline = try expandPipeline(allocator, state, chain.pipeline);
+        defer freePipeline(allocator, expanded_pipeline);
+
+        last_status = try pipeline.executePipelineForeground(allocator, state, expanded_pipeline, &tryRunFunction);
     }
 
     state.setStatus(last_status);
     return last_status;
 }
 
+/// Free memory allocated for an expanded pipeline
+fn freePipeline(allocator: std.mem.Allocator, p: ExpandedPipeline) void {
+    for (p.commands) |cmd| {
+        allocator.free(cmd.argv);
+        allocator.free(cmd.env);
+        allocator.free(cmd.redirects);
+    }
+    allocator.free(p.commands);
+}
+
+/// Expand a pipeline with current state
+fn expandPipeline(allocator: std.mem.Allocator, state: *State, ast_pipeline: expansion_types.ast.Pipeline) !ExpandedPipeline {
+    var ctx = expansion.ExpandContext.init(allocator, state);
+    defer ctx.deinit();
+    return expansion_statement.expandPipeline(allocator, &ctx, ast_pipeline);
+}
+
+/// Expand a pipeline in a child process context (exits on error instead of returning)
+fn expandPipelineInChild(allocator: std.mem.Allocator, state: *State, ast_pipeline: expansion_types.ast.Pipeline) ExpandedPipeline {
+    var ctx = expansion.ExpandContext.init(allocator, state);
+    defer ctx.deinit();
+    return expansion_statement.expandPipeline(allocator, &ctx, ast_pipeline) catch {
+        std.posix.exit(1);
+    };
+}
+
 /// Execute a command statement with output capture (=> or =>@)
-fn executeCmdWithCapture(allocator: std.mem.Allocator, state: *State, stmt: expansion_types.ExpandedCmdStmt, capture: expansion_types.Capture) !u8 {
+fn executeCmdWithCapture(allocator: std.mem.Allocator, state: *State, stmt: expansion_types.ast.CommandStatement, capture: expansion_types.Capture) !u8 {
     const result = switch (try capture_mod.forkWithPipe()) {
         .child => {
             // In child: execute the command chains
             var last_status: u8 = 0;
             for (stmt.chains) |chain| {
+                // Expand pipeline (exits on error)
+                const expanded_pipeline = expandPipelineInChild(allocator, state, chain.pipeline);
+
                 // For single commands, try builtin first, then external
-                if (chain.pipeline.commands.len == 1) {
-                    const cmd = chain.pipeline.commands[0];
+                if (expanded_pipeline.commands.len == 1) {
+                    const cmd = expanded_pipeline.commands[0];
                     if (cmd.argv.len > 0) {
                         if (builtins.tryRun(state, cmd)) |status| {
                             last_status = status;
@@ -320,7 +355,7 @@ fn executeCmdWithCapture(allocator: std.mem.Allocator, state: *State, stmt: expa
                     }
                 }
                 // External command or pipeline
-                last_status = pipeline.executePipelineInChild(allocator, state, chain.pipeline, &tryRunFunction) catch 1;
+                last_status = pipeline.executePipelineInChild(allocator, state, expanded_pipeline, &tryRunFunction) catch 1;
             }
             std.posix.exit(last_status);
         },
@@ -352,7 +387,7 @@ fn executeCmdWithCapture(allocator: std.mem.Allocator, state: *State, stmt: expa
     return result.status;
 }
 
-fn executeBackgroundJob(allocator: std.mem.Allocator, state: *State, stmt: expansion_types.ExpandedCmdStmt, cmd_str: []const u8) !u8 {
+fn executeBackgroundJob(allocator: std.mem.Allocator, state: *State, stmt: expansion_types.ast.CommandStatement, cmd_str: []const u8) !u8 {
     // Fork a child to be the process group leader
     const pid = try std.posix.fork();
 
@@ -366,7 +401,10 @@ fn executeBackgroundJob(allocator: std.mem.Allocator, state: *State, stmt: expan
         // Execute the statement chains
         var last_status: u8 = 0;
         for (stmt.chains) |chain| {
-            last_status = pipeline.executePipelineInChild(allocator, state, chain.pipeline, &tryRunFunction) catch 1;
+            // Expand pipeline (exits on error)
+            const expanded_pipeline = expandPipelineInChild(allocator, state, chain.pipeline);
+
+            last_status = pipeline.executePipelineInChild(allocator, state, expanded_pipeline, &tryRunFunction) catch 1;
         }
         std.posix.exit(last_status);
     }

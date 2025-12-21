@@ -87,21 +87,32 @@ interpreter/
 
 #### Expansion (`expansion/`)
 
-The expander takes an AST and shell state, then produces fully-resolved **expanded types**. This involves:
+The expander converts AST nodes into execution-ready structures. It operates in **two stages**:
 
-- **Expansion**: Variables (`$x`), globs (`*.txt`), tilde (`~`), command substitution (`$(...)`)
-- **Resolution**: Converting AST nodes to concrete `ExpandedCmd`, `ExpandedStmt` structures
+**Stage 1: Statement Expansion** - Processes control flow and command structure:
+- **Control flow statements** (`if`, `for`, `while`, `fun`) - passed through as AST (bodies re-parsed at execution time)
+- **Command chains** - stored as unexpanded AST `ChainItem` (expanded just-in-time during execution)
+- **Capture and background flags** - extracted and stored
 
-The result is pure data — no more parsing or variable lookups needed.
+**Stage 2: Pipeline Expansion** (happens at execution time):
+- **Variables** (`$x`), **globs** (`*.txt`), **tilde** (`~`), **command substitution** (`$(...)`)
+- **Command arguments** - expanded from `[]WordPart` to `[]const u8` (argv)
+- **Environment assignments** - values expanded
+- **Redirections** - targets expanded (e.g., `> $outfile` → `> result.txt`)
+
+**Why delay pipeline expansion?** Chains are expanded **just-in-time** during execution so that each command in a chain sees the **current** shell state. This ensures `set x 1 && echo $x` works correctly - the variable is set before `$x` is expanded in the second command.
+
+The result is a mix of AST (chains, control flow bodies) and expanded data (ready for immediate use).
 
 #### Execution (`execution/`)
 
-The executor takes expanded types and makes them happen:
+The executor takes this mixed representation and executes it:
 
-- **Process management**: `fork()`, `execvpe()`, process groups
-- **Pipeline wiring**: Connecting commands with pipes
-- **Redirections**: File descriptors for `>`, `>>`, `2>&1`, etc.
-- **Job control**: Background jobs, foreground/background switching
+- **Expands pipelines on-demand** - converts `ast.Pipeline` → `ExpandedPipeline` right before execution
+- **Process management** - `fork()`, `execvpe()`, process groups
+- **Pipeline wiring** - connects commands with pipes
+- **Redirections** - applies file descriptors for `>`, `>>`, `2>&1`, etc.
+- **Job control** - manages background jobs, foreground/background switching
 
 **Key functions:**
 ```zig
@@ -497,10 +508,30 @@ No word-splitting surprises.
 
 ### 3. Separation of AST and Expanded Types
 
-- **AST** = syntactic structure (what the user wrote)
-- **Expanded** = resolved execution intent (what to actually do)
+Oshen uses a **minimal set of types** with lazy expansion:
 
-This keeps expansion logic isolated and testable.
+- **AST** (`src/language/ast.zig`) - Syntactic structure (reused where possible)
+- **Expanded** (`src/interpreter/expansion/expanded.zig`) - Only types that require transformation
+
+**Statement-level types** (all from `ast.zig`, reused directly):
+- `CommandStatement` - chains, background, capture (stored unexpanded)
+- `FunctionDefinition` - name and body string
+- `IfStatement`, `ForStatement`, `WhileStatement` - control flow with body strings
+- `break`, `continue`, `return` - simple control flow
+
+**Pipeline-level types** (transformed during JIT expansion):
+- `ExpandedPipeline` - list of `ExpandedCmd`
+- `ExpandedCmd` - argv, env, redirects (all fully resolved)
+- `ExpandedRedir` - fd, kind, path/target
+- `EnvKV` - key-value pair with expanded value
+
+**Just-in-time pipeline expansion:** Chains store `ast.ChainItem` (unexpanded). Each `ast.Pipeline` is expanded to `ExpandedPipeline` using **current** shell state right before execution:
+```zig
+set x 1 && echo $x    // Works! $x expanded after 'set' executes
+cd /tmp && pwd        // Works! pwd sees new directory
+```
+
+This design minimizes redundant types - we only create new types when transformation actually happens (e.g., `[]WordPart` → `[]const u8`).
 
 ### 4. Arena Allocation Per Command
 
