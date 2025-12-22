@@ -7,7 +7,7 @@
 //! TRANSFORMED (new types defined below):
 //!   - ExpandedRedir - parses ">" into structured {fd, kind, path}
 //!   - ExpandedCmd - expands $vars, globs, ~, $(cmd) into flat argv
-//!   - EnvKV - expands assignment values
+//!   - Uses ast.Assignment for expanded environment variables
 
 pub const ast = @import("../../language/ast.zig");
 
@@ -55,24 +55,11 @@ pub const ExpandedRedir = struct {
     }
 };
 
-/// Environment variable for command - value is expanded
-/// AST has: Assignment { key, value: []WordPart }
-/// Plan has: EnvKV { key, value: "expanded string" }
-pub const EnvKV = struct {
-    key: []const u8,
-    value: []const u8,
-};
-
 /// Command - fully expanded and ready to exec
 /// AST has: Command { words: [][]WordPart, ... } with $vars, globs, quotes
 /// Expanded has: ExpandedCmd { argv: ["echo", "hello", "a.txt", "b.txt"], ... } flat strings
 pub const ExpandedCmd = struct {
     argv: []const []const u8,
-    env: []const EnvKV,
+    env: []const ast.Assignment,
     redirects: []const ExpandedRedir,
-};
-
-/// Pipeline - list of expanded commands
-pub const ExpandedPipeline = struct {
-    commands: []const ExpandedCmd,
 };

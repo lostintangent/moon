@@ -250,9 +250,7 @@ pub const Parser = struct {
             const parsed = tryParseEnvAssignment(tok.kind.word) orelse break;
 
             _ = self.advance();
-            const value_seg = self.allocator.alloc(WordPart, 1) catch return ParseError.OutOfMemory;
-            value_seg[0] = .{ .quotes = .none, .text = parsed.value };
-            try assignments.append(self.allocator, .{ .key = parsed.key, .value = value_seg });
+            try assignments.append(self.allocator, .{ .key = parsed.key, .value = parsed.value });
         }
     }
 

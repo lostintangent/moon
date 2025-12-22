@@ -113,11 +113,14 @@ pub const Redirect = struct {
 // =============================================================================
 
 /// An environment variable assignment prefix (e.g., `FOO=bar cmd`)
+/// Can represent both unexpanded (AST) and expanded forms.
+/// In AST: value is the literal string from source
+/// In ExpandedCmd: value is the expanded string
 pub const Assignment = struct {
     /// The variable name
     key: []const u8,
-    /// The value (may contain variables to expand)
-    value: []const WordPart,
+    /// The value as a string (literal in AST, expanded in ExpandedCmd)
+    value: []const u8,
 };
 
 /// A single command with optional assignments, words, and redirects.

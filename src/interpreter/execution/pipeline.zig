@@ -16,7 +16,6 @@ const redirect = @import("redirect.zig");
 const jobs = @import("jobs.zig");
 
 const ExpandedCmd = expansion_types.ExpandedCmd;
-const ExpandedPipeline = expansion_types.ExpandedPipeline;
 const posix = jobs.posix;
 
 // =============================================================================
@@ -46,12 +45,12 @@ pub fn buildArgv(allocator: std.mem.Allocator, cmd: ExpandedCmd) !std.ArrayListU
 }
 
 /// Execute a pipeline in foreground, checking for aliases, builtins, and functions first
-pub fn executePipelineForeground(allocator: std.mem.Allocator, state: *State, pipeline: ExpandedPipeline, tryRunFunction: FunctionExecutor) !u8 {
-    if (pipeline.commands.len == 0) return 0;
+pub fn executePipelineForeground(allocator: std.mem.Allocator, state: *State, commands: []const ExpandedCmd, tryRunFunction: FunctionExecutor) !u8 {
+    if (commands.len == 0) return 0;
 
     // Single command - check for builtin first, then functions
-    if (pipeline.commands.len == 1) {
-        const cmd = pipeline.commands[0];
+    if (commands.len == 1) {
+        const cmd = commands[0];
         if (cmd.argv.len > 0) {
             // Check if it's a builtin
             if (builtins.isBuiltin(cmd.argv[0])) {
@@ -73,10 +72,10 @@ pub fn executePipelineForeground(allocator: std.mem.Allocator, state: *State, pi
                 return status;
             }
         }
-        return try executePipelineWithJobControl(allocator, state, pipeline, tryRunFunction);
+        return try executePipelineWithJobControl(allocator, state, commands, tryRunFunction);
     }
 
-    return try executePipelineWithJobControl(allocator, state, pipeline, tryRunFunction);
+    return try executePipelineWithJobControl(allocator, state, commands, tryRunFunction);
 }
 
 /// Execute a builtin command with file redirections by forking
@@ -118,19 +117,19 @@ fn executeFunctionWithRedirects(allocator: std.mem.Allocator, state: *State, cmd
 // =============================================================================
 
 /// Execute a pipeline in a child process (no job control needed)
-pub fn executePipelineInChild(allocator: std.mem.Allocator, state: ?*State, pipeline: ExpandedPipeline, tryRunFunction: ?FunctionExecutor) !u8 {
-    if (pipeline.commands.len == 0) return 0;
+pub fn executePipelineInChild(allocator: std.mem.Allocator, state: ?*State, commands: []const ExpandedCmd, tryRunFunction: ?FunctionExecutor) !u8 {
+    if (commands.len == 0) return 0;
 
     // In child, we don't need job control - just execute
-    if (pipeline.commands.len == 1) {
+    if (commands.len == 1) {
         if (state) |s| {
-            return try executeSingleCommand(allocator, s, pipeline.commands[0], tryRunFunction);
+            return try executeSingleCommand(allocator, s, commands[0], tryRunFunction);
         }
-        return try executeCommandSimple(allocator, pipeline.commands[0]);
+        return try executeCommandSimple(allocator, commands[0]);
     }
 
     // Multi-command pipeline
-    const n = pipeline.commands.len;
+    const n = commands.len;
     var pipes: std.ArrayListUnmanaged([2]std.posix.fd_t) = .empty;
     defer {
         for (pipes.items) |pipe| {
@@ -148,7 +147,7 @@ pub fn executePipelineInChild(allocator: std.mem.Allocator, state: ?*State, pipe
     var pids: std.ArrayListUnmanaged(std.posix.pid_t) = .empty;
     defer pids.deinit(allocator);
 
-    for (pipeline.commands, 0..) |cmd, i| {
+    for (commands, 0..) |cmd, i| {
         const stdin_fd: ?std.posix.fd_t = if (i == 0) null else pipes.items[i - 1][0];
         const stdout_fd: ?std.posix.fd_t = if (i == n - 1) null else pipes.items[i][1];
 
@@ -214,8 +213,8 @@ fn executeSingleCommand(allocator: std.mem.Allocator, state: *State, cmd: Expand
 // =============================================================================
 
 /// Execute a pipeline with full job control (terminal handling, process groups)
-pub fn executePipelineWithJobControl(allocator: std.mem.Allocator, state: *State, pipeline: ExpandedPipeline, tryRunFunction: FunctionExecutor) !u8 {
-    const n = pipeline.commands.len;
+pub fn executePipelineWithJobControl(allocator: std.mem.Allocator, state: *State, commands: []const ExpandedCmd, tryRunFunction: FunctionExecutor) !u8 {
+    const n = commands.len;
 
     // Create pipes for multi-command pipeline
     var pipes: std.ArrayListUnmanaged([2]std.posix.fd_t) = .empty;
@@ -238,7 +237,7 @@ pub fn executePipelineWithJobControl(allocator: std.mem.Allocator, state: *State
 
     var pgid: std.posix.pid_t = 0;
 
-    for (pipeline.commands, 0..) |cmd, i| {
+    for (commands, 0..) |cmd, i| {
         const stdin_fd: ?std.posix.fd_t = if (i == 0) null else pipes.items[i - 1][0];
         const stdout_fd: ?std.posix.fd_t = if (i == n - 1) null else pipes.items[i][1];
 

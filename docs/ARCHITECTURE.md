@@ -496,12 +496,11 @@ The executor runs AST statements directly — there's no separate "expanded stat
 - `IfStatement`, `ForStatement`, `WhileStatement` - control flow with body strings
 
 **Expanded types** (`src/interpreter/expansion/expanded.zig`) exist only for pipelines:
-- `ExpandedPipeline` - list of `ExpandedCmd`
-- `ExpandedCmd` - argv, env, redirects (all fully resolved)
+- `ExpandedCmd` - argv, env, redirects (all fully resolved, returned as `[]const ExpandedCmd`)
 - `ExpandedRedir` - fd, kind, path/target
-- `EnvKV` - key-value pair with expanded value
+- Uses `ast.Assignment` for environment variables (with expanded values)
 
-**Just-in-time pipeline expansion:** Each `ast.Pipeline` is expanded to `ExpandedPipeline` using **current** shell state right before execution:
+**Just-in-time pipeline expansion:** Each `ast.Pipeline` is expanded to `[]const ExpandedCmd` using **current** shell state right before execution:
 ```zig
 set x 1 && echo $x    // Works! $x expanded after 'set' executes
 cd /tmp && pwd        // Works! pwd sees new directory

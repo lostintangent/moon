@@ -76,8 +76,8 @@ const TestContext = struct {
     /// Helper to get the first expanded command from a program (for simple test cases)
     fn getFirstExpandedCmd(self: *TestContext, prog: ast.Program) !expansion_types.ExpandedCmd {
         const ast_pipeline = prog.statements[0].kind.command.chains[0].pipeline;
-        const expanded_pipeline = try expansion.expandPipeline(self.arena.allocator(), &self.ctx, ast_pipeline);
-        return expanded_pipeline.commands[0];
+        const expanded_cmds = try expansion.expandPipeline(self.arena.allocator(), &self.ctx, ast_pipeline);
+        return expanded_cmds[0];
     }
 };
 
@@ -424,8 +424,8 @@ test "function: multiple statements after definition" {
     try std.testing.expectEqualStrings("greet", prog_expanded.statements[0].kind.function.name);
     // Second statement is command - need to expand it
     const ast_pipeline = prog_expanded.statements[1].kind.command.chains[0].pipeline;
-    const expanded_pipeline = try expansion.expandPipeline(t.arena.allocator(), &t.ctx, ast_pipeline);
-    const cmd = expanded_pipeline.commands[0];
+    const expanded_cmds = try expansion.expandPipeline(t.arena.allocator(), &t.ctx, ast_pipeline);
+    const cmd = expanded_cmds[0];
     const expected = [_][]const u8{ "echo", "after" };
     try expectArgvEqual(cmd.argv, &expected);
 }
@@ -512,8 +512,8 @@ test "if: command after if statement" {
     _ = prog_expanded.statements[0].kind.@"if";
     // Second statement is command - need to expand it
     const ast_pipeline = prog_expanded.statements[1].kind.command.chains[0].pipeline;
-    const expanded_pipeline = try expansion.expandPipeline(t.arena.allocator(), &t.ctx, ast_pipeline);
-    const cmd = expanded_pipeline.commands[0];
+    const expanded_cmds = try expansion.expandPipeline(t.arena.allocator(), &t.ctx, ast_pipeline);
+    const cmd = expanded_cmds[0];
     const expected = [_][]const u8{ "echo", "after" };
     try expectArgvEqual(cmd.argv, &expected);
 }

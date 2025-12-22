@@ -27,10 +27,8 @@ const Redirect = ast.Redirect;
 const WordPart = token_types.WordPart;
 const CaptureMode = ast.CaptureMode;
 
-const ExpandedPipeline = expansion_types.ExpandedPipeline;
 const ExpandedCmd = expansion_types.ExpandedCmd;
 const ExpandedRedir = expansion_types.ExpandedRedir;
-const EnvKV = expansion_types.EnvKV;
 const Capture = expansion_types.Capture;
 
 pub const ExpandError = error{
@@ -42,18 +40,8 @@ pub const ExpandError = error{
 // Public API
 // =============================================================================
 
-/// Statements pass through unchanged - expansion happens at execution time.
-/// This function exists for interface compatibility during the transition.
-pub fn expandStatement(_: std.mem.Allocator, _: *expand.ExpandContext, stmt: Stmt) (ExpandError || expand.ExpandError || std.mem.Allocator.Error)!Stmt {
-    return stmt;
-}
-
-// =============================================================================
-// Internal Expansion Functions
-// =============================================================================
-
-// Made public for JIT expansion during execution
-pub fn expandPipeline(allocator: std.mem.Allocator, ctx: *expand.ExpandContext, pipeline: Pipeline) (ExpandError || expand.ExpandError || std.mem.Allocator.Error)!ExpandedPipeline {
+/// Expand all commands in a pipeline, returning owned slice of ExpandedCmd
+pub fn expandPipeline(allocator: std.mem.Allocator, ctx: *expand.ExpandContext, pipeline: Pipeline) (ExpandError || expand.ExpandError || std.mem.Allocator.Error)![]const ExpandedCmd {
     var cmd_expanded: std.ArrayListUnmanaged(ExpandedCmd) = .empty;
 
     for (pipeline.commands) |cmd| {
@@ -61,20 +49,37 @@ pub fn expandPipeline(allocator: std.mem.Allocator, ctx: *expand.ExpandContext, 
         try cmd_expanded.append(allocator, expanded_result);
     }
 
-    return ExpandedPipeline{
-        .commands = try cmd_expanded.toOwnedSlice(allocator),
-    };
+    return try cmd_expanded.toOwnedSlice(allocator);
 }
 
+// =============================================================================
+// Internal Expansion Functions
+// =============================================================================
+
 fn expandCommand(allocator: std.mem.Allocator, ctx: *expand.ExpandContext, cmd: Command) (ExpandError || expand.ExpandError || std.mem.Allocator.Error)!ExpandedCmd {
-    var env_list: std.ArrayListUnmanaged(EnvKV) = .empty;
+    var env_list: std.ArrayListUnmanaged(ast.Assignment) = .empty;
 
     const words_with_alias = try applyAliasExpansion(allocator, ctx, cmd.words);
 
     for (cmd.assignments) |assign| {
-        const expanded_values = try expand.expandWord(ctx, assign.value);
-        const joined = try joinValues(allocator, expanded_values);
-        try env_list.append(allocator, .{ .key = assign.key, .value = joined });
+        // Parse the assignment value as a word and expand it
+        var lexer = lexer_mod.Lexer.init(allocator, assign.value);
+        const tokens = lexer.tokenize() catch {
+            // If tokenization fails, use the literal value
+            try env_list.append(allocator, .{ .key = assign.key, .value = assign.value });
+            continue;
+        };
+
+        var expanded_value: []const u8 = "";
+        if (tokens.len > 0 and tokens[0].kind == .word) {
+            const expanded_values = try expand.expandWord(ctx, tokens[0].kind.word);
+            expanded_value = try joinValues(allocator, expanded_values);
+        } else {
+            // No word token, use literal value
+            expanded_value = assign.value;
+        }
+
+        try env_list.append(allocator, .{ .key = assign.key, .value = expanded_value });
     }
 
     const expanded_argv = try expand.expandWords(ctx, words_with_alias);
@@ -204,8 +209,8 @@ test "simple command" {
     try testing.expectEqual(@as(usize, 1), prog.statements.len);
     // Expand the pipeline at execution time
     const ast_pipeline = prog.statements[0].kind.command.chains[0].pipeline;
-    const expanded_pipeline = try expandPipeline(arena.allocator(), &ctx, ast_pipeline);
-    const cmd_expanded = expanded_pipeline.commands[0];
+    const expanded_cmds = try expandPipeline(arena.allocator(), &ctx, ast_pipeline);
+    const cmd_expanded = expanded_cmds[0];
     try testing.expectEqual(@as(usize, 3), cmd_expanded.argv.len);
     try testing.expectEqualStrings("echo", cmd_expanded.argv[0]);
     try testing.expectEqualStrings("hello", cmd_expanded.argv[1]);
@@ -237,8 +242,8 @@ test "with variable expansion" {
 
     // Expand the pipeline at execution time
     const ast_pipeline = prog.statements[0].kind.command.chains[0].pipeline;
-    const expanded_pipeline = try expandPipeline(arena.allocator(), &ctx, ast_pipeline);
-    const cmd_expanded = expanded_pipeline.commands[0];
+    const expanded_cmds = try expandPipeline(arena.allocator(), &ctx, ast_pipeline);
+    const cmd_expanded = expanded_cmds[0];
     try testing.expectEqual(@as(usize, 2), cmd_expanded.argv.len);
     try testing.expectEqualStrings("echo", cmd_expanded.argv[0]);
     try testing.expectEqualStrings("world", cmd_expanded.argv[1]);
@@ -256,8 +261,8 @@ test "with env prefix" {
 
     // Expand the pipeline at execution time
     const ast_pipeline = prog.statements[0].kind.command.chains[0].pipeline;
-    const expanded_pipeline = try expandPipeline(arena.allocator(), &ctx, ast_pipeline);
-    const cmd_expanded = expanded_pipeline.commands[0];
+    const expanded_cmds = try expandPipeline(arena.allocator(), &ctx, ast_pipeline);
+    const cmd_expanded = expanded_cmds[0];
     try testing.expectEqual(@as(usize, 1), cmd_expanded.env.len);
     try testing.expectEqualStrings("FOO", cmd_expanded.env[0].key);
     try testing.expectEqualStrings("bar", cmd_expanded.env[0].value);
