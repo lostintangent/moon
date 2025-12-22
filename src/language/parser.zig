@@ -588,14 +588,18 @@ pub const Parser = struct {
             return Statement{ .kind = .@"continue" };
         }
         if (self.isOp("return")) {
+            const return_pos = self.pos;
             _ = self.advance();
-            // Check for optional status argument
-            const status_parts: ?[]const WordPart = if (self.isWord()) blk: {
-                const tok = self.peek().?;
+            // Check for optional status argument - capture as raw source string
+            const status_str: ?[]const u8 = if (self.isWord()) blk: {
+                const start = self.pos;
                 _ = self.advance();
-                break :blk tok.kind.word;
+                break :blk std.mem.trim(u8, self.extractSourceRange(start, self.pos), " \t\n");
+            } else if (self.pos > return_pos + 1) blk: {
+                // Handle case where there's something after return but it's not a word
+                break :blk null;
             } else null;
-            return Statement{ .kind = .{ .@"return" = status_parts } };
+            return Statement{ .kind = .{ .@"return" = status_str } };
         }
         if (self.isOp("defer")) {
             _ = self.advance(); // consume 'defer'
@@ -1074,7 +1078,7 @@ test "Return: without argument" {
 
     try testing.expectEqual(@as(usize, 1), prog.statements.len);
     try testing.expect(prog.statements[0].kind == .@"return");
-    try testing.expectEqual(@as(?[]const WordPart, null), prog.statements[0].kind.@"return");
+    try testing.expectEqual(@as(?[]const u8, null), prog.statements[0].kind.@"return");
 }
 
 test "Return: with status" {
@@ -1085,9 +1089,7 @@ test "Return: with status" {
 
     try testing.expectEqual(@as(usize, 1), prog.statements.len);
     try testing.expect(prog.statements[0].kind == .@"return");
-    const parts = prog.statements[0].kind.@"return".?;
-    try testing.expectEqual(@as(usize, 1), parts.len);
-    try testing.expectEqualStrings("1", parts[0].text);
+    try testing.expectEqualStrings("1", prog.statements[0].kind.@"return".?);
 }
 
 test "Return: with zero" {
@@ -1098,9 +1100,7 @@ test "Return: with zero" {
 
     try testing.expectEqual(@as(usize, 1), prog.statements.len);
     try testing.expect(prog.statements[0].kind == .@"return");
-    const parts = prog.statements[0].kind.@"return".?;
-    try testing.expectEqual(@as(usize, 1), parts.len);
-    try testing.expectEqualStrings("0", parts[0].text);
+    try testing.expectEqualStrings("0", prog.statements[0].kind.@"return".?);
 }
 
 test "Return: with variable" {
@@ -1111,7 +1111,7 @@ test "Return: with variable" {
 
     try testing.expectEqual(@as(usize, 1), prog.statements.len);
     try testing.expect(prog.statements[0].kind == .@"return");
-    try testing.expect(prog.statements[0].kind.@"return" != null);
+    try testing.expectEqualStrings("$status", prog.statements[0].kind.@"return".?);
 }
 
 test "Defer: simple command" {

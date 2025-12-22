@@ -22,8 +22,6 @@ const exec = @import("execution/exec.zig");
 const lexer = @import("../language/lexer.zig");
 const parser = @import("../language/parser.zig");
 const ast_mod = @import("../language/ast.zig");
-const expand = @import("expansion/word.zig");
-const expansion = @import("expansion/statement.zig");
 const capture = @import("execution/capture.zig");
 
 // =============================================================================
@@ -118,11 +116,7 @@ pub fn executeAst(allocator: std.mem.Allocator, state: *State, parsed: ParsedInp
     var last_status: u8 = 0;
 
     for (parsed.ast.statements) |stmt| {
-        var ctx = expand.ExpandContext.init(arena_alloc, state);
-        defer ctx.deinit();
-
-        const stmt_expanded = try expansion.expandStatement(arena_alloc, &ctx, stmt);
-        last_status = try exec.executeStatement(arena_alloc, state, stmt_expanded, parsed.input);
+        last_status = try exec.executeStatement(arena_alloc, state, stmt, parsed.input);
 
         // Break/continue signals bubble up to the enclosing loop
         if (state.loop_break or state.loop_continue) {

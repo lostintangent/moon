@@ -184,8 +184,8 @@ pub const StatementKind = union(enum) {
     @"break": void,
     /// Continue to next iteration of innermost loop
     @"continue": void,
-    /// Return from current function with optional status
-    @"return": ?[]const WordPart,
+    /// Return from current function with optional status (raw source, expanded at runtime)
+    @"return": ?[]const u8,
     /// Defer a command to run when the current function exits
     @"defer": []const u8,
 };

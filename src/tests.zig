@@ -65,23 +65,16 @@ const TestContext = struct {
         self.arena.deinit();
     }
 
-    /// Helper to expand shell input and return the expanded program
-    fn expandInput(self: *TestContext, input: []const u8) !expansion_types.ExpandedProgram {
+    /// Helper to parse shell input and return the AST program
+    fn parseInput(self: *TestContext, input: []const u8) !ast.Program {
         var lex = lexer.Lexer.init(self.arena.allocator(), input);
         const tokens = try lex.tokenize();
         var p = parser.Parser.initWithInput(self.arena.allocator(), tokens, input);
-        const prog = try p.parse();
-
-        var stmt_expanded: std.ArrayListUnmanaged(expansion_types.ExpandedStmt) = .empty;
-        for (prog.statements) |stmt| {
-            const exp = try expansion.expandStatement(self.arena.allocator(), &self.ctx, stmt);
-            try stmt_expanded.append(self.arena.allocator(), exp);
-        }
-        return expansion_types.ExpandedProgram{ .statements = try stmt_expanded.toOwnedSlice(self.arena.allocator()) };
+        return try p.parse();
     }
 
     /// Helper to get the first expanded command from a program (for simple test cases)
-    fn getFirstExpandedCmd(self: *TestContext, prog: expansion_types.ExpandedProgram) !expansion_types.ExpandedCmd {
+    fn getFirstExpandedCmd(self: *TestContext, prog: ast.Program) !expansion_types.ExpandedCmd {
         const ast_pipeline = prog.statements[0].kind.command.chains[0].pipeline;
         const expanded_pipeline = try expansion.expandPipeline(self.arena.allocator(), &self.ctx, ast_pipeline);
         return expanded_pipeline.commands[0];
@@ -115,7 +108,7 @@ test "integration: simple echo" {
     t.setup();
     defer t.deinit();
 
-    const prog_expanded = try t.expandInput("echo hello");
+    const prog_expanded = try t.parseInput("echo hello");
     const cmd = try t.getFirstExpandedCmd(prog_expanded);
 
     const expected = [_][]const u8{ "echo", "hello" };
@@ -127,7 +120,7 @@ test "integration: quote escapes" {
     t.setup();
     defer t.deinit();
 
-    const prog_expanded = try t.expandInput("echo \"a b\" 'c\"d'");
+    const prog_expanded = try t.parseInput("echo \"a b\" 'c\"d'");
     const cmd = try t.getFirstExpandedCmd(prog_expanded);
 
     try std.testing.expectEqual(@as(usize, 3), cmd.argv.len);
@@ -143,7 +136,7 @@ test "integration: variable list expansion" {
     const xs_values = [_][]const u8{ "a", "b" };
     try t.ctx.setVar("xs", &xs_values);
 
-    const prog_expanded = try t.expandInput("echo $xs");
+    const prog_expanded = try t.parseInput("echo $xs");
     const cmd = try t.getFirstExpandedCmd(prog_expanded);
 
     const expected = [_][]const u8{ "echo", "a", "b" };
@@ -158,7 +151,7 @@ test "integration: cartesian prefix" {
     const xs_values = [_][]const u8{ "a", "b" };
     try t.ctx.setVar("xs", &xs_values);
 
-    const prog_expanded = try t.expandInput("echo pre$xs");
+    const prog_expanded = try t.parseInput("echo pre$xs");
     const cmd = try t.getFirstExpandedCmd(prog_expanded);
 
     const expected = [_][]const u8{ "echo", "prea", "preb" };
@@ -172,7 +165,7 @@ test "integration: tilde expansion" {
 
     t.state.home = "/home/jon";
 
-    const prog_expanded = try t.expandInput("cd ~/src");
+    const prog_expanded = try t.parseInput("cd ~/src");
     const cmd = try t.getFirstExpandedCmd(prog_expanded);
 
     const expected = [_][]const u8{ "cd", "/home/jon/src" };
@@ -186,7 +179,7 @@ test "integration: command substitution" {
 
     try t.ctx.setMockCmdsub("whoami", "jon");
 
-    const prog_expanded = try t.expandInput("echo $(whoami)");
+    const prog_expanded = try t.parseInput("echo $(whoami)");
     const cmd = try t.getFirstExpandedCmd(prog_expanded);
 
     const expected = [_][]const u8{ "echo", "jon" };
@@ -201,7 +194,7 @@ test "integration: glob expansion" {
     const matches = [_][]const u8{ "src/main.zig", "src/util.zig" };
     try t.ctx.setMockGlob("src/*.zig", &matches);
 
-    const prog_expanded = try t.expandInput("echo src/*.zig");
+    const prog_expanded = try t.parseInput("echo src/*.zig");
     const cmd = try t.getFirstExpandedCmd(prog_expanded);
 
     const expected = [_][]const u8{ "echo", "src/main.zig", "src/util.zig" };
@@ -216,7 +209,7 @@ test "integration: glob suppressed in quotes" {
     const matches = [_][]const u8{ "src/main.zig", "src/util.zig" };
     try t.ctx.setMockGlob("src/*.zig", &matches);
 
-    const prog_expanded = try t.expandInput("echo \"src/*.zig\"");
+    const prog_expanded = try t.parseInput("echo \"src/*.zig\"");
     const cmd = try t.getFirstExpandedCmd(prog_expanded);
 
     const expected = [_][]const u8{ "echo", "src/*.zig" };
@@ -231,7 +224,7 @@ test "integration: single quotes disable expansion" {
     const xs_values = [_][]const u8{ "a", "b" };
     try t.ctx.setVar("xs", &xs_values);
 
-    const prog_expanded = try t.expandInput("echo '$xs'");
+    const prog_expanded = try t.parseInput("echo '$xs'");
     const cmd = try t.getFirstExpandedCmd(prog_expanded);
 
     const expected = [_][]const u8{ "echo", "$xs" };
@@ -383,7 +376,7 @@ test "config: variable set via config is expandable" {
     try t.state.setVar("MYNAME", "world");
 
     // Now expand a command using that variable
-    const prog_expanded = try t.expandInput("echo hello $MYNAME");
+    const prog_expanded = try t.parseInput("echo hello $MYNAME");
     const cmd = try t.getFirstExpandedCmd(prog_expanded);
 
     const expected = [_][]const u8{ "echo", "hello", "world" };
@@ -399,7 +392,7 @@ test "function: definition creates function plan" {
     t.setup();
     defer t.deinit();
 
-    const prog_expanded = try t.expandInput("fun greet\n  echo hello\nend");
+    const prog_expanded = try t.parseInput("fun greet\n  echo hello\nend");
 
     try std.testing.expectEqual(@as(usize, 1), prog_expanded.statements.len);
     const fun_def = prog_expanded.statements[0].kind.function;
@@ -412,7 +405,7 @@ test "function: inline definition" {
     t.setup();
     defer t.deinit();
 
-    const prog_expanded = try t.expandInput("fun greet echo hello end");
+    const prog_expanded = try t.parseInput("fun greet echo hello end");
 
     try std.testing.expectEqual(@as(usize, 1), prog_expanded.statements.len);
     const fun_def = prog_expanded.statements[0].kind.function;
@@ -424,7 +417,7 @@ test "function: multiple statements after definition" {
     t.setup();
     defer t.deinit();
 
-    const prog_expanded = try t.expandInput("fun greet\n  echo hello\nend\necho after");
+    const prog_expanded = try t.parseInput("fun greet\n  echo hello\nend\necho after");
 
     try std.testing.expectEqual(@as(usize, 2), prog_expanded.statements.len);
     // First statement is function definition
@@ -449,7 +442,7 @@ test "function: body captures multiline content" {
         \\  echo line3
         \\end
     ;
-    const prog_expanded = try t.expandInput(input);
+    const prog_expanded = try t.parseInput(input);
 
     const fun_def = prog_expanded.statements[0].kind.function;
     try std.testing.expectEqualStrings("multi", fun_def.name);
@@ -468,7 +461,7 @@ test "if: simple condition creates if plan" {
     t.setup();
     defer t.deinit();
 
-    const prog_expanded = try t.expandInput("if true\n  echo yes\nend");
+    const prog_expanded = try t.parseInput("if true\n  echo yes\nend");
 
     try std.testing.expectEqual(@as(usize, 1), prog_expanded.statements.len);
     const if_stmt = prog_expanded.statements[0].kind.@"if";
@@ -483,7 +476,7 @@ test "if: with else branch" {
     t.setup();
     defer t.deinit();
 
-    const prog_expanded = try t.expandInput("if false\n  echo no\nelse\n  echo yes\nend");
+    const prog_expanded = try t.parseInput("if false\n  echo no\nelse\n  echo yes\nend");
 
     try std.testing.expectEqual(@as(usize, 1), prog_expanded.statements.len);
     const if_stmt = prog_expanded.statements[0].kind.@"if";
@@ -499,7 +492,7 @@ test "if: inline syntax" {
     t.setup();
     defer t.deinit();
 
-    const prog_expanded = try t.expandInput("if true; echo yes; end");
+    const prog_expanded = try t.parseInput("if true; echo yes; end");
 
     try std.testing.expectEqual(@as(usize, 1), prog_expanded.statements.len);
     const if_stmt = prog_expanded.statements[0].kind.@"if";
@@ -512,7 +505,7 @@ test "if: command after if statement" {
     t.setup();
     defer t.deinit();
 
-    const prog_expanded = try t.expandInput("if true\n  echo yes\nend\necho after");
+    const prog_expanded = try t.parseInput("if true\n  echo yes\nend\necho after");
 
     try std.testing.expectEqual(@as(usize, 2), prog_expanded.statements.len);
     // First statement is if
@@ -530,7 +523,7 @@ test "if: else if chain" {
     t.setup();
     defer t.deinit();
 
-    const prog_expanded = try t.expandInput("if false\n  echo 1\nelse if false\n  echo 2\nelse if true\n  echo 3\nelse\n  echo 4\nend");
+    const prog_expanded = try t.parseInput("if false\n  echo 1\nelse if false\n  echo 2\nelse if true\n  echo 3\nelse\n  echo 4\nend");
 
     try std.testing.expectEqual(@as(usize, 1), prog_expanded.statements.len);
     const if_stmt = prog_expanded.statements[0].kind.@"if";
@@ -548,7 +541,7 @@ test "if: else if without final else" {
     t.setup();
     defer t.deinit();
 
-    const prog_expanded = try t.expandInput("if false\n  echo 1\nelse if true\n  echo 2\nend");
+    const prog_expanded = try t.parseInput("if false\n  echo 1\nelse if true\n  echo 2\nend");
 
     try std.testing.expectEqual(@as(usize, 1), prog_expanded.statements.len);
     const if_stmt = prog_expanded.statements[0].kind.@"if";
@@ -565,7 +558,7 @@ test "break: creates break plan" {
     t.setup();
     defer t.deinit();
 
-    const prog_expanded = try t.expandInput("for i in 1 2 3; if true; break; end; end");
+    const prog_expanded = try t.parseInput("for i in 1 2 3; if true; break; end; end");
 
     try std.testing.expectEqual(@as(usize, 1), prog_expanded.statements.len);
     _ = prog_expanded.statements[0].kind.@"for";
@@ -576,7 +569,7 @@ test "continue: creates continue plan" {
     t.setup();
     defer t.deinit();
 
-    const prog_expanded = try t.expandInput("for i in 1 2 3; if true; continue; end; end");
+    const prog_expanded = try t.parseInput("for i in 1 2 3; if true; continue; end; end");
 
     try std.testing.expectEqual(@as(usize, 1), prog_expanded.statements.len);
     _ = prog_expanded.statements[0].kind.@"for";
@@ -591,7 +584,7 @@ test "capture: basic string capture" {
     t.setup();
     defer t.deinit();
 
-    const prog_expanded = try t.expandInput("echo hello => x");
+    const prog_expanded = try t.parseInput("echo hello => x");
 
     try std.testing.expectEqual(@as(usize, 1), prog_expanded.statements.len);
     const cmd_stmt = prog_expanded.statements[0].kind.command;
@@ -605,7 +598,7 @@ test "capture: lines capture" {
     t.setup();
     defer t.deinit();
 
-    const prog_expanded = try t.expandInput("ls =>@ files");
+    const prog_expanded = try t.parseInput("ls =>@ files");
 
     try std.testing.expectEqual(@as(usize, 1), prog_expanded.statements.len);
     const cmd_stmt = prog_expanded.statements[0].kind.command;
@@ -623,7 +616,7 @@ test "for: basic loop" {
     t.setup();
     defer t.deinit();
 
-    const prog_expanded = try t.expandInput("for x in a b c; echo $x; end");
+    const prog_expanded = try t.parseInput("for x in a b c; echo $x; end");
 
     try std.testing.expectEqual(@as(usize, 1), prog_expanded.statements.len);
     const for_stmt = prog_expanded.statements[0].kind.@"for";
@@ -637,7 +630,7 @@ test "for: multi-line syntax" {
     t.setup();
     defer t.deinit();
 
-    const prog_expanded = try t.expandInput("for i in 1 2 3\necho $i\nend");
+    const prog_expanded = try t.parseInput("for i in 1 2 3\necho $i\nend");
 
     try std.testing.expectEqual(@as(usize, 1), prog_expanded.statements.len);
     const for_stmt = prog_expanded.statements[0].kind.@"for";
@@ -657,7 +650,7 @@ test "commandsub: basic substitution" {
     // Set up mock for command substitution
     try t.ctx.setMockCmdsub("echo hello", "hello");
 
-    const prog_expanded = try t.expandInput("echo $(echo hello)");
+    const prog_expanded = try t.parseInput("echo $(echo hello)");
     const cmd = try t.getFirstExpandedCmd(prog_expanded);
 
     try std.testing.expectEqual(@as(usize, 1), prog_expanded.statements.len);
@@ -675,7 +668,7 @@ test "commandsub: multi-line splits into list" {
     // Mock returns multi-line output
     try t.ctx.setMockCmdsub("echo lines", "a\nb\nc");
 
-    const prog_expanded = try t.expandInput("echo $(echo lines)");
+    const prog_expanded = try t.parseInput("echo $(echo lines)");
     const cmd = try t.getFirstExpandedCmd(prog_expanded);
 
     try std.testing.expectEqual(@as(usize, 1), prog_expanded.statements.len);

@@ -1,14 +1,8 @@
 //! Expanded types - the fully resolved representation ready for execution
 //!
-//! The expander transforms AST nodes into expanded types. Types that pass through
-//! unchanged reference ast.zig directly (FunctionDefinition, IfStatement, ForStatement, WhileStatement).
-//! New types are defined only where expansion does actual work:
-//!
-//! UNCHANGED (ast types used directly in ExpandedStmtKind union):
-//!   - ast.FunctionDefinition - body stored as string, re-parsed at runtime
-//!   - ast.IfStatement - condition/body stored as strings
-//!   - ast.ForStatement - items expanded at runtime, not expansion time
-//!   - ast.WhileStatement - condition re-evaluated each iteration
+//! The expander transforms AST nodes into expanded types. Statement-level types
+//! use ast.StatementKind directly since control flow statements (if, for, while, etc.)
+//! store their bodies as strings and are re-parsed at runtime.
 //!
 //! TRANSFORMED (new types defined below):
 //!   - ExpandedRedir - parses ">" into structured {fd, kind, path}
@@ -81,28 +75,4 @@ pub const ExpandedCmd = struct {
 /// Pipeline - list of expanded commands
 pub const ExpandedPipeline = struct {
     commands: []const ExpandedCmd,
-};
-
-// =============================================================================
-// Statement wrapper (mirrors AST structure)
-// =============================================================================
-
-pub const ExpandedStmtKind = union(enum) {
-    command: ast.CommandStatement,
-    function: ast.FunctionDefinition,
-    @"if": ast.IfStatement,
-    @"for": ast.ForStatement,
-    @"while": ast.WhileStatement,
-    @"break": void,
-    @"continue": void,
-    @"return": ?[]const u8, // Expanded string value (parsed to u8 at execution)
-    @"defer": []const u8, // Command source to execute on function exit
-};
-
-pub const ExpandedStmt = struct {
-    kind: ExpandedStmtKind,
-};
-
-pub const ExpandedProgram = struct {
-    statements: []const ExpandedStmt,
 };

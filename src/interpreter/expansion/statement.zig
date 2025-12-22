@@ -27,8 +27,6 @@ const Redirect = ast.Redirect;
 const WordPart = token_types.WordPart;
 const CaptureMode = ast.CaptureMode;
 
-const ExpandedProgram = expansion_types.ExpandedProgram;
-const ExpandedStmt = expansion_types.ExpandedStmt;
 const ExpandedPipeline = expansion_types.ExpandedPipeline;
 const ExpandedCmd = expansion_types.ExpandedCmd;
 const ExpandedRedir = expansion_types.ExpandedRedir;
@@ -44,80 +42,10 @@ pub const ExpandError = error{
 // Public API
 // =============================================================================
 
-pub fn expandStatement(allocator: std.mem.Allocator, ctx: *expand.ExpandContext, stmt: Stmt) (ExpandError || expand.ExpandError || std.mem.Allocator.Error)!ExpandedStmt {
-    return switch (stmt.kind) {
-        .command => |cmd_stmt| blk: {
-            // Store chains unexpanded - they'll be expanded at execution time
-            var chains_unexpanded: std.ArrayListUnmanaged(ast.ChainItem) = .empty;
-
-            for (cmd_stmt.chains) |chain| {
-                try chains_unexpanded.append(allocator, chain);
-            }
-
-            var capture_expanded: ?Capture = null;
-
-            if (cmd_stmt.capture) |cap| {
-                capture_expanded = .{
-                    .mode = cap.mode,
-                    .variable = cap.variable,
-                };
-            }
-
-            break :blk ExpandedStmt{
-                .kind = .{ .command = ast.CommandStatement{
-                    .chains = try chains_unexpanded.toOwnedSlice(allocator),
-                    .background = cmd_stmt.background,
-                    .capture = capture_expanded,
-                } },
-            };
-        },
-        .function => |fun_def| ExpandedStmt{
-            .kind = .{ .function = expansion_types.ast.FunctionDefinition{
-                .name = fun_def.name,
-                .body = fun_def.body,
-            } },
-        },
-        .@"if" => |if_stmt| ExpandedStmt{
-            .kind = .{ .@"if" = expansion_types.ast.IfStatement{
-                .branches = if_stmt.branches,
-                .else_body = if_stmt.else_body,
-            } },
-        },
-        .@"for" => |for_stmt| ExpandedStmt{
-            .kind = .{ .@"for" = expansion_types.ast.ForStatement{
-                .variable = for_stmt.variable,
-                .items_source = for_stmt.items_source,
-                .body = for_stmt.body,
-            } },
-        },
-        .@"while" => |while_stmt| ExpandedStmt{
-            .kind = .{ .@"while" = expansion_types.ast.WhileStatement{
-                .condition = while_stmt.condition,
-                .body = while_stmt.body,
-            } },
-        },
-        .@"break" => ExpandedStmt{
-            .kind = .@"break",
-        },
-        .@"continue" => ExpandedStmt{
-            .kind = .@"continue",
-        },
-        .@"return" => |status_parts| blk: {
-            // Expand the status argument if present
-            if (status_parts) |parts| {
-                const expanded = try expand.expandWord(ctx, parts);
-                // Take the first expanded word as the status string
-                if (expanded.len > 0) {
-                    break :blk ExpandedStmt{ .kind = .{ .@"return" = expanded[0] } };
-                }
-            }
-            break :blk ExpandedStmt{ .kind = .{ .@"return" = null } };
-        },
-        .@"defer" => |cmd_source| ExpandedStmt{
-            // Pass through the command source unchanged - will be parsed at execution
-            .kind = .{ .@"defer" = cmd_source },
-        },
-    };
+/// Statements pass through unchanged - expansion happens at execution time.
+/// This function exists for interface compatibility during the transition.
+pub fn expandStatement(_: std.mem.Allocator, _: *expand.ExpandContext, stmt: Stmt) (ExpandError || expand.ExpandError || std.mem.Allocator.Error)!Stmt {
+    return stmt;
 }
 
 // =============================================================================
@@ -256,19 +184,11 @@ fn joinValues(allocator: std.mem.Allocator, values: []const []const u8) std.mem.
 const testing = std.testing;
 const parser = @import("../../language/parser.zig");
 
-fn expandInput(allocator: std.mem.Allocator, ctx: *expand.ExpandContext, input: []const u8) !ExpandedProgram {
+fn expandInput(allocator: std.mem.Allocator, input: []const u8) !Program {
     var lex = lexer_mod.Lexer.init(allocator, input);
     const tokens = try lex.tokenize();
     var p = parser.Parser.init(allocator, tokens);
-    const prog = try p.parse();
-
-    // Expand each statement (mirrors statement-by-statement execution)
-    var stmt_expanded: std.ArrayListUnmanaged(ExpandedStmt) = .empty;
-    for (prog.statements) |stmt| {
-        const expanded = try expandStatement(allocator, ctx, stmt);
-        try stmt_expanded.append(allocator, expanded);
-    }
-    return ExpandedProgram{ .statements = try stmt_expanded.toOwnedSlice(allocator) };
+    return try p.parse();
 }
 
 test "simple command" {
@@ -279,11 +199,11 @@ test "simple command" {
     var ctx = expand.ExpandContext.init(arena.allocator(), &state);
     defer ctx.deinit();
 
-    const prog_expanded = try expandInput(arena.allocator(), &ctx, "echo hello world");
+    const prog = try expandInput(arena.allocator(), "echo hello world");
 
-    try testing.expectEqual(@as(usize, 1), prog_expanded.statements.len);
-    // Chains are now stored unexpanded, so we need to expand them
-    const ast_pipeline = prog_expanded.statements[0].kind.command.chains[0].pipeline;
+    try testing.expectEqual(@as(usize, 1), prog.statements.len);
+    // Expand the pipeline at execution time
+    const ast_pipeline = prog.statements[0].kind.command.chains[0].pipeline;
     const expanded_pipeline = try expandPipeline(arena.allocator(), &ctx, ast_pipeline);
     const cmd_expanded = expanded_pipeline.commands[0];
     try testing.expectEqual(@as(usize, 3), cmd_expanded.argv.len);
@@ -295,15 +215,11 @@ test "simple command" {
 test "pipeline normalizes |> to |" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    var state = State.init(arena.allocator());
-    defer state.deinit();
-    var ctx = expand.ExpandContext.init(arena.allocator(), &state);
-    defer ctx.deinit();
 
-    const prog_expanded = try expandInput(arena.allocator(), &ctx, "cat file |> grep foo");
+    const prog = try expandInput(arena.allocator(), "cat file |> grep foo");
 
-    const pipeline_expanded = prog_expanded.statements[0].kind.command.chains[0].pipeline;
-    try testing.expectEqual(@as(usize, 2), pipeline_expanded.commands.len);
+    const pipeline = prog.statements[0].kind.command.chains[0].pipeline;
+    try testing.expectEqual(@as(usize, 2), pipeline.commands.len);
 }
 
 test "with variable expansion" {
@@ -317,10 +233,10 @@ test "with variable expansion" {
     const name_values = [_][]const u8{"world"};
     try ctx.setVar("name", &name_values);
 
-    const prog_expanded = try expandInput(arena.allocator(), &ctx, "echo $name");
+    const prog = try expandInput(arena.allocator(), "echo $name");
 
-    // Chains are now stored unexpanded, so we need to expand them
-    const ast_pipeline = prog_expanded.statements[0].kind.command.chains[0].pipeline;
+    // Expand the pipeline at execution time
+    const ast_pipeline = prog.statements[0].kind.command.chains[0].pipeline;
     const expanded_pipeline = try expandPipeline(arena.allocator(), &ctx, ast_pipeline);
     const cmd_expanded = expanded_pipeline.commands[0];
     try testing.expectEqual(@as(usize, 2), cmd_expanded.argv.len);
@@ -336,10 +252,10 @@ test "with env prefix" {
     var ctx = expand.ExpandContext.init(arena.allocator(), &state);
     defer ctx.deinit();
 
-    const prog_expanded = try expandInput(arena.allocator(), &ctx, "FOO=bar env");
+    const prog = try expandInput(arena.allocator(), "FOO=bar env");
 
-    // Chains are now stored unexpanded, so we need to expand them
-    const ast_pipeline = prog_expanded.statements[0].kind.command.chains[0].pipeline;
+    // Expand the pipeline at execution time
+    const ast_pipeline = prog.statements[0].kind.command.chains[0].pipeline;
     const expanded_pipeline = try expandPipeline(arena.allocator(), &ctx, ast_pipeline);
     const cmd_expanded = expanded_pipeline.commands[0];
     try testing.expectEqual(@as(usize, 1), cmd_expanded.env.len);
@@ -350,26 +266,18 @@ test "with env prefix" {
 test "capture preserved" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    var state = State.init(arena.allocator());
-    defer state.deinit();
-    var ctx = expand.ExpandContext.init(arena.allocator(), &state);
-    defer ctx.deinit();
 
-    const prog_expanded = try expandInput(arena.allocator(), &ctx, "whoami => user");
+    const prog = try expandInput(arena.allocator(), "whoami => user");
 
-    try testing.expectEqualStrings("user", prog_expanded.statements[0].kind.command.capture.?.variable);
-    try testing.expectEqual(ast.CaptureMode.string, prog_expanded.statements[0].kind.command.capture.?.mode);
+    try testing.expectEqualStrings("user", prog.statements[0].kind.command.capture.?.variable);
+    try testing.expectEqual(ast.CaptureMode.string, prog.statements[0].kind.command.capture.?.mode);
 }
 
 test "background preserved" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    var state = State.init(arena.allocator());
-    defer state.deinit();
-    var ctx = expand.ExpandContext.init(arena.allocator(), &state);
-    defer ctx.deinit();
 
-    const prog_expanded = try expandInput(arena.allocator(), &ctx, "sleep 10 &");
+    const prog = try expandInput(arena.allocator(), "sleep 10 &");
 
-    try testing.expectEqual(true, prog_expanded.statements[0].kind.command.background);
+    try testing.expectEqual(true, prog.statements[0].kind.command.background);
 }

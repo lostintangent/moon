@@ -10,7 +10,7 @@ This document describes Oshen's internal architecture and execution flow.
   - [Runtime](#3-runtime-srcruntime)
   - [REPL](#4-repl-srcrepl)
 - [Execution Pipeline](#execution-pipeline)
-  - [The Four Stages](#the-four-stages)
+  - [The Three Stages](#the-three-stages)
   - [Pipeline Diagram](#pipeline-diagram)
 - [Process & Job Control](#process--job-control)
 - [Key Design Decisions](#key-design-decisions)
@@ -68,47 +68,43 @@ The language subsystem converts source text into a structured AST. It knows noth
 
 ### 2. Interpreter (`src/interpreter/`)
 
-The interpreter subsystem handles expansion and execution.
+The interpreter subsystem handles execution, with expansion happening just-in-time.
 
 ```
 interpreter/
-├── interpreter.zig        Orchestrates: lex → parse → expand → execute
-├── expansion/             "What to do" — expand AST to executable form
-│   ├── expansion.zig      AST + State → expanded execution data
-│   ├── types.zig          Expanded type definitions (ExpandedCmd, ExpandedStmt, etc.)
-│   ├── expand.zig         Variable, tilde, command substitution expansion
+├── interpreter.zig        Orchestrates: lex → parse → execute
+├── expansion/             Word and pipeline expansion
+│   ├── statement.zig      Pipeline expansion (AST Pipeline → ExpandedPipeline)
+│   ├── expanded.zig       Expanded types (ExpandedCmd, ExpandedPipeline, etc.)
+│   ├── word.zig           Variable, tilde, command substitution expansion
 │   └── glob.zig           Glob pattern matching (*, **, ?, [abc], [a-z])
-└── execution/             "Do it" — run the expanded commands
-    ├── exec.zig           Process spawning, pipeline wiring, job control
+└── execution/             Process execution
+    ├── exec.zig           Statement dispatch, control flow, process spawning
+    ├── pipeline.zig       Pipeline wiring and execution
     ├── capture.zig        Output capture for `=>`, `=>@`, and `$(...)`
-    ├── redir.zig          File descriptor manipulation for redirections
-    └── io.zig             stdout/stderr write utilities
+    └── redirect.zig       File descriptor manipulation for redirections
 ```
 
 #### Expansion (`expansion/`)
 
-The expander converts AST nodes into execution-ready structures. It operates in **two stages**:
+Expansion happens **just-in-time during execution**, not as a separate phase. The AST is executed directly, and pipelines are expanded immediately before being run.
 
-**Stage 1: Statement Expansion** - Processes control flow and command structure:
-- **Control flow statements** (`if`, `for`, `while`, `fun`) - passed through as AST (bodies re-parsed at execution time)
-- **Command chains** - stored as unexpanded AST `ChainItem` (expanded just-in-time during execution)
-- **Capture and background flags** - extracted and stored
-
-**Stage 2: Pipeline Expansion** (happens at execution time):
+**What gets expanded:**
 - **Variables** (`$x`), **globs** (`*.txt`), **tilde** (`~`), **command substitution** (`$(...)`)
 - **Command arguments** - expanded from `[]WordPart` to `[]const u8` (argv)
 - **Environment assignments** - values expanded
 - **Redirections** - targets expanded (e.g., `> $outfile` → `> result.txt`)
 
-**Why delay pipeline expansion?** Chains are expanded **just-in-time** during execution so that each command in a chain sees the **current** shell state. This ensures `set x 1 && echo $x` works correctly - the variable is set before `$x` is expanded in the second command.
+**Why just-in-time expansion?** Each command in a chain sees the **current** shell state. This ensures `set x 1 && echo $x` works correctly - the variable is set before `$x` is expanded in the second command.
 
-The result is a mix of AST (chains, control flow bodies) and expanded data (ready for immediate use).
+**Control flow statements** (`if`, `for`, `while`, `fun`) store their bodies as strings and are re-parsed at execution time. This creates natural recursion boundaries.
 
 #### Execution (`execution/`)
 
-The executor takes this mixed representation and executes it:
+The executor runs AST statements directly:
 
-- **Expands pipelines on-demand** - converts `ast.Pipeline` → `ExpandedPipeline` right before execution
+- **Statement dispatch** - routes to appropriate handler (command, if, for, while, function, etc.)
+- **Pipeline expansion** - converts `ast.Pipeline` → `ExpandedPipeline` just before execution
 - **Process management** - `fork()`, `execvpe()`, process groups
 - **Pipeline wiring** - connects commands with pipes
 - **Redirections** - applies file descriptors for `>`, `>>`, `2>&1`, etc.
@@ -216,7 +212,7 @@ Shared primitives for terminal interaction, used by both the REPL and interactiv
 | `ansi.zig` | ANSI color codes, text styling, cursor movement, display length |
 | `tui.zig` | Raw mode, key reading, and interactive terminal features |
 
-When oshen processes input, it goes through four stages:
+When oshen processes input, it goes through three stages:
 
 #### 1. Lexer
 
@@ -238,11 +234,11 @@ Program
         └── Redirections: []
 ```
 
-#### 3. Expander
+#### 3. Executor (with just-in-time expansion)
 
-The expander takes an AST and produces fully-resolved execution data. As it processes each command, it resolves word contents.
+The executor runs AST statements directly. When it encounters a pipeline, it expands word contents just before execution.
 
-The expander is a **second parsing layer** that interprets expansion syntax within words. While the structural parser handles command grammar, the expander has its own mini-parser for:
+Word expansion is a **second parsing layer** that interprets expansion syntax within words. While the structural parser handles command grammar, the expander has its own mini-parser for:
 
 ```
 $var        → parse identifier characters
@@ -309,11 +305,7 @@ ExpandedCmd {
 }
 ```
 
-The result is pure data — no more parsing or variable lookups needed.
-
-#### 4. Executor
-
-Spawns processes, wires pipes, handles redirections:
+After expansion, the executor spawns processes, wires pipes, and handles redirections:
 
 ```
 fork() → child: exec("echo", args)
@@ -324,7 +316,7 @@ fork() → child: exec("echo", args)
 
 ### Pipeline Diagram
 
-**Key insight**: Parse once, but expand/execute each statement individually. This allows `set x 1; echo $x` to work — the variable is set before `$x` is expanded.
+**Key insight**: Parse once, but execute each statement individually with just-in-time expansion. This allows `set x 1; echo $x` to work — the variable is set before `$x` is expanded.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
@@ -351,13 +343,7 @@ fork() → child: exec("echo", args)
               │                                   │
               ▼                                   │
      ┌─────────────────┐                          │
-     │   INTERPRETER   │                          │
-     │     Expand      │                          │
-     └────────┬────────┘                          │
-              │                                   │
-              ▼                                   │
-     ┌─────────────────┐                          │
-     │    RUNTIME      │                          │
+     │    EXECUTOR     │                          │
      │ state.x = "1"   │  ← Variable now exists   │
      └────────┬────────┘                          │
               │                                   │
@@ -365,13 +351,8 @@ fork() → child: exec("echo", args)
                                                   │
                                                   ▼
                                          ┌─────────────────┐
-                                         │   INTERPRETER   │
-                                         │ $x → "1"        │
-                                         └────────┬────────┘
-                                                  │
-                                                  ▼
-                                         ┌─────────────────┐
-                                         │    RUNTIME      │
+                                         │    EXECUTOR     │
+                                         │ expand: $x → "1"│
                                          │ exec: echo "1"  │
                                          └─────────────────┘
 ```
@@ -487,13 +468,11 @@ Parse all statements upfront, but expand/execute one at a time:
 
 ```zig
 for (ast.statements) |stmt| {
-    var ctx = ExpandContext.init(allocator, state);
-    const expanded = try expandStatement(allocator, &ctx, stmt);
-    _ = try executeStatement(allocator, state, expanded, input);
+    _ = try executeStatement(allocator, state, stmt, input);
 }
 ```
 
-This ensures side effects are visible to subsequent statements.
+This ensures side effects are visible to subsequent statements. Expansion happens inside `executeStatement` just before each pipeline runs.
 
 ### 2. List Variables
 
@@ -506,32 +485,29 @@ Variables are arrays, not strings:
 
 No word-splitting surprises.
 
-### 3. Separation of AST and Expanded Types
+### 3. AST Executed Directly
 
-Oshen uses a **minimal set of types** with lazy expansion:
+The executor runs AST statements directly — there's no separate "expanded statement" type. This keeps the type system simple and avoids redundant data structures.
 
-- **AST** (`src/language/ast.zig`) - Syntactic structure (reused where possible)
-- **Expanded** (`src/interpreter/expansion/expanded.zig`) - Only types that require transformation
-
-**Statement-level types** (all from `ast.zig`, reused directly):
-- `CommandStatement` - chains, background, capture (stored unexpanded)
+**AST types** (`src/language/ast.zig`) are used throughout:
+- `Statement` - dispatched directly to the executor
+- `CommandStatement` - chains, background, capture
 - `FunctionDefinition` - name and body string
 - `IfStatement`, `ForStatement`, `WhileStatement` - control flow with body strings
-- `break`, `continue`, `return` - simple control flow
 
-**Pipeline-level types** (transformed during JIT expansion):
+**Expanded types** (`src/interpreter/expansion/expanded.zig`) exist only for pipelines:
 - `ExpandedPipeline` - list of `ExpandedCmd`
 - `ExpandedCmd` - argv, env, redirects (all fully resolved)
 - `ExpandedRedir` - fd, kind, path/target
 - `EnvKV` - key-value pair with expanded value
 
-**Just-in-time pipeline expansion:** Chains store `ast.ChainItem` (unexpanded). Each `ast.Pipeline` is expanded to `ExpandedPipeline` using **current** shell state right before execution:
+**Just-in-time pipeline expansion:** Each `ast.Pipeline` is expanded to `ExpandedPipeline` using **current** shell state right before execution:
 ```zig
 set x 1 && echo $x    // Works! $x expanded after 'set' executes
 cd /tmp && pwd        // Works! pwd sees new directory
 ```
 
-This design minimizes redundant types - we only create new types when transformation actually happens (e.g., `[]WordPart` → `[]const u8`).
+This design minimizes types - we only create expanded types when transformation actually happens (e.g., `[]WordPart` → `[]const u8` for command argv).
 
 ### 4. Arena Allocation Per Command
 
@@ -546,31 +522,27 @@ Simple, fast, no leaks.
 
 ### 5. Control Flow via Body Strings
 
-`if`, `for`, `while`, and `fun` store their bodies as strings:
+`if`, `for`, `while`, and `fun` store their bodies as strings in the AST:
 
 ```zig
-// For-loop body stored as string
-ExpandedStmt {
-    .kind = .for_loop: ast.ForLoop {
-        .var_name = "x",
-        .items = &.{"a", "b", "c"},
-        .body = "echo $x",
-    }
+// For-loop in AST
+ast.ForStatement {
+    .variable = "x",
+    .items_source = "a b c",
+    .body = "echo $x",
 }
 
 // If-statement with branches for if/else-if chains
-ExpandedStmt {
-    .kind = .@"if": ast.IfStatement {
-        .branches = &.{
-            .{ .condition = "test $x -lt 10", .body = "echo small" },
-            .{ .condition = "test $x -lt 100", .body = "echo large" },
-        },
-        .else_body = "echo huge",
-    }
+ast.IfStatement {
+    .branches = &.{
+        .{ .condition = "test $x -lt 10", .body = "echo small" },
+        .{ .condition = "test $x -lt 100", .body = "echo large" },
+    },
+    .else_body = "echo huge",
 }
 ```
 
-Bodies are re-parsed and executed via `interpreter.execute()`. This creates a natural recursion boundary and keeps the expander simple.
+Bodies are re-parsed and executed via `interpreter.execute()`. This creates a natural recursion boundary and simplifies the execution model.
 
 ### 6. Loop Control and Return via State Flags
 

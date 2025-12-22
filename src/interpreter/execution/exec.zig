@@ -24,9 +24,8 @@ const jobs = @import("jobs.zig");
 const pipeline = @import("pipeline.zig");
 const capture_mod = @import("capture.zig");
 
+const ast = @import("../../language/ast.zig");
 const ExpandedCmd = expansion_types.ExpandedCmd;
-const ExpandedProgram = expansion_types.ExpandedProgram;
-const ExpandedStmt = expansion_types.ExpandedStmt;
 const ExpandedPipeline = expansion_types.ExpandedPipeline;
 const posix = jobs.posix;
 
@@ -43,8 +42,8 @@ pub const continueJobBackground = jobs.continueJobBackground;
 // Public API
 // =============================================================================
 
-/// Execute a command plan
-pub fn execute(allocator: std.mem.Allocator, state: *State, prog: ExpandedProgram, cmd_str: []const u8) !u8 {
+/// Execute a parsed program
+pub fn execute(allocator: std.mem.Allocator, state: *State, prog: ast.Program, cmd_str: []const u8) !u8 {
     var last_status: u8 = 0;
 
     for (prog.statements) |stmt| {
@@ -54,7 +53,7 @@ pub fn execute(allocator: std.mem.Allocator, state: *State, prog: ExpandedProgra
     return last_status;
 }
 
-pub fn executeStatement(allocator: std.mem.Allocator, state: *State, stmt: ExpandedStmt, cmd_str: []const u8) !u8 {
+pub fn executeStatement(allocator: std.mem.Allocator, state: *State, stmt: ast.Statement, cmd_str: []const u8) !u8 {
     return switch (stmt.kind) {
         .command => |cmd_stmt| try executeCmdStatement(allocator, state, cmd_stmt, cmd_str),
         .function => |fun_def| {
@@ -76,12 +75,29 @@ pub fn executeStatement(allocator: std.mem.Allocator, state: *State, stmt: Expan
         .@"return" => |opt_status_str| {
             state.fn_return = true;
             if (opt_status_str) |status_str| {
-                // Parse the expanded string as u8 and set as status
-                const parsed = std.fmt.parseInt(u8, status_str, 10) catch blk: {
-                    io.printError("return: {s}: numeric argument required\n", .{status_str});
-                    break :blk 1;
+                // Tokenize, expand, and parse the status value at runtime
+                var lexer = lexer_mod.Lexer.init(allocator, status_str);
+                const tokens = lexer.tokenize() catch {
+                    io.printError("return: invalid argument\n", .{});
+                    state.setStatus(1);
+                    return 1;
                 };
-                state.setStatus(parsed);
+                if (tokens.len > 0 and tokens[0].kind == .word) {
+                    var expand_ctx = expand.ExpandContext.init(allocator, state);
+                    defer expand_ctx.deinit();
+                    const expanded = expand.expandWord(&expand_ctx, tokens[0].kind.word) catch {
+                        io.printError("return: expansion error\n", .{});
+                        state.setStatus(1);
+                        return 1;
+                    };
+                    if (expanded.len > 0) {
+                        const parsed = std.fmt.parseInt(u8, expanded[0], 10) catch blk: {
+                            io.printError("return: {s}: numeric argument required\n", .{expanded[0]});
+                            break :blk 1;
+                        };
+                        state.setStatus(parsed);
+                    }
+                }
             }
             // If no argument, status is already the last command's exit status
             return state.status;
