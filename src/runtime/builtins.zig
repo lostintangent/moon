@@ -42,6 +42,7 @@ const alias_builtin = @import("builtins/alias.zig");
 const unalias_builtin = @import("builtins/unalias.zig");
 const test_builtin = @import("builtins/test.zig");
 const path_prepend_builtin = @import("builtins/path_prepend.zig");
+const math_builtin = @import("builtins/math.zig");
 
 /// All registered builtins - single source of truth
 const all_builtins = [_]Builtin{
@@ -67,6 +68,7 @@ const all_builtins = [_]Builtin{
     test_builtin.builtin,
     test_builtin.bracket_builtin,
     path_prepend_builtin.builtin,
+    math_builtin.builtin,
 };
 
 /// Compile-time map for O(1) builtin lookup (built from all_builtins)

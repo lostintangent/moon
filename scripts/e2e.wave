@@ -143,7 +143,7 @@ test_case "Special chars in string" 'echo "hello@#\$%"' "hello@#\$%"
 # ============================================================================
 # Command Substitution
 # ============================================================================
-print_header "Command Substitution (8 tests)"
+print_header "Command Substitution (16 tests)"
 
 test_case "Basic substitution" 'echo $(echo hello)' "hello"
 test_case "Substitution in string" 'echo "result: $(echo test)"' "result: test"
@@ -153,6 +153,16 @@ test_case "Substitution with variable" 'var x world; echo $(echo $x)' "world"
 test_case "Empty substitution" 'echo [$(echo)]' "[]"
 test_case "Substitution arithmetic" 'echo $(expr 2 + 2)' "4"
 test_case "Multi-word substitution" 'echo $(echo one two)' "one two"
+
+# Bare paren syntax (fish-style)
+test_case "Bare paren basic" 'echo (echo hello)' "hello"
+test_case "Bare paren in string concat" 'echo "result: "(echo test)' "result: test"
+test_case "Bare paren nested" 'echo (echo (echo nested))' "nested"
+test_case "Bare paren with variable" 'var x world; echo (echo $x)' "world"
+test_case "Bare paren concatenation" 'echo prefix_(echo middle)_suffix' "prefix_middle_suffix"
+test_case "Bare paren with pipe" 'echo (echo hello | cat)' "hello"
+test_case "Quoted paren is literal" 'echo "(not a command)"' "(not a command)"
+test_case "Mixed bare and dollar paren" 'echo (echo a) $(echo b)' "a b"
 
 # ============================================================================
 # Conditionals (If/Else)
@@ -544,6 +554,35 @@ inner_cleanup
 outer_work
 outer_cleanup"
 test_exit_code "Defer preserves exit status" "fun f; defer echo cleanup; return 42; end; f" "42"
+
+# ============================================================================
+# Math Builtin
+# ============================================================================
+print_header "Math Builtin (14 tests)"
+
+# Basic operations
+test_case "Math addition" 'math 2 + 3' "5"
+test_case "Math subtraction" 'math 10 - 3' "7"
+test_case "Math multiplication" 'math "4 * 5"' "20"
+test_case "Math division" 'math 20 / 4' "5"
+test_case "Math modulo" 'math 17 % 5' "2"
+
+# Operator precedence
+test_case "Math precedence mul before add" 'math "2 + 3 * 4"' "14"
+test_case "Math precedence with parens" 'math "(2 + 3) * 4"' "20"
+test_case "Math nested parens" 'math "((2 + 3) * 2) + 1"' "11"
+
+# Unary minus
+test_case "Math negative number" 'math -5 + 10' "5"
+test_case "Math double negative" 'math "- -5"' "5"
+
+# With variables and command substitution
+test_case "Math with variable" 'var x 5; math $x + 3' "8"
+test_case "Math with bare paren capture" 'var result (math 3 + 4); echo $result' "7"
+test_case "Math in loop" 'var sum 0; for i in 1 2 3; set sum (math $sum + $i); end; echo $sum' "6"
+
+# Error handling
+test_exit_code "Math division by zero" 'math 5 / 0' "1"
 
 # ============================================================================
 # Print Summary

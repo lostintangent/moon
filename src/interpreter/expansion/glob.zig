@@ -15,10 +15,15 @@
 
 const std = @import("std");
 
-/// Check if a pattern contains glob metacharacters
+/// Check if a pattern contains unescaped glob metacharacters
 pub fn hasGlobChars(pattern: []const u8) bool {
-    for (pattern) |c| {
-        if (c == '*' or c == '?' or c == '[') return true;
+    var i: usize = 0;
+    while (i < pattern.len) : (i += 1) {
+        if (pattern[i] == '\\' and i + 1 < pattern.len) {
+            i += 1; // skip escaped char
+            continue;
+        }
+        if (pattern[i] == '*' or pattern[i] == '?' or pattern[i] == '[') return true;
     }
     return false;
 }
@@ -328,6 +333,14 @@ test "hasGlobChars: detects metacharacters" {
     try testing.expect(hasGlobChars("**/*.zig"));
     try testing.expect(!hasGlobChars("plain.txt"));
     try testing.expect(!hasGlobChars("no-globs-here"));
+}
+
+test "hasGlobChars: ignores escaped metacharacters" {
+    try testing.expect(!hasGlobChars("\\*.txt"));
+    try testing.expect(!hasGlobChars("file\\?.log"));
+    try testing.expect(!hasGlobChars("\\[abc\\].md"));
+    try testing.expect(hasGlobChars("\\*.txt*")); // escaped star, then real star
+    try testing.expect(!hasGlobChars("literal\\*asterisk"));
 }
 
 test "globMatch: double star matches path segments" {

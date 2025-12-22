@@ -374,13 +374,14 @@ fn expandText(ctx: *ExpandContext, text: []const u8, opts: ExpandOptions) (Expan
                 const escaped = switch (ch) {
                     'n' => "\n",
                     't' => "\t",
+                    'e' => "\x1b", // ESC character for ANSI codes
                     '\\' => "\\",
                     '"' => "\"",
                     '$' => "$",
                     else => blk: {
-                        const s = try ctx.allocator.alloc(u8, 2);
-                        s[0] = '\\';
-                        s[1] = ch;
+                        // Strip backslash: \* → *, \( → (, etc.
+                        const s = try ctx.allocator.alloc(u8, 1);
+                        s[0] = ch;
                         break :blk s;
                     },
                 };
@@ -405,9 +406,10 @@ fn expandText(ctx: *ExpandContext, text: []const u8, opts: ExpandOptions) (Expan
     const expanded_items = try results.toOwnedSlice(ctx.allocator);
 
     // Handle glob expansion for bare words
+    // Check for unescaped glob chars in ORIGINAL text, not the expanded result
     if (opts.expand_glob and expanded_items.len == 1) {
-        const pattern = expanded_items[0];
-        if (glob.hasGlobChars(pattern)) {
+        if (glob.hasGlobChars(text)) {
+            const pattern = expanded_items[0];
             return try glob.expandGlob(ctx.allocator, pattern, ctx.mock_glob);
         }
     }

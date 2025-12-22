@@ -5,7 +5,7 @@ A modern shell with a clean syntax and a great developer experience out-of-the-b
 - **Zero-setup REPL** — Syntax highlighting, ghost text, completions, and a beautiful default prompt.
 - **Clean syntax** — Familiar control flow with script-friendly ergonomics, plus [`defer`](#defer) for automatic cleanup.
 - **Lists by default** — Variables, [globs](#glob-patterns), and [brace expansion](#brace-expansion) all produce lists, which can be enumerated, indexed, or sliced.
-- **Modern builtins** — [Colored output](#colored-output-with-print) with `print --green`, [output capture](#output-capture) with `=>`, and [`path_prepend`](#path_prepend) that deduplicates.
+- **Modern builtins** — [Colored output](#colored-output-with-print), [output capture](#output-capture), [`math`](#math-expressions), [`path_prepend`](#path_prepend), and more!
 
 ---
 
@@ -273,7 +273,7 @@ end
 
 # Show git branch
 fun prompt
-    var branch $(git branch --show-current 2>/dev/null)
+    var branch (git branch --show-current 2>/dev/null)
     if test -n "$branch"
         print "[$branch] $ "
     else
@@ -283,7 +283,7 @@ end
 
 # Colorful prompt with path
 fun prompt
-    print -n --green "$(pwd -t)" --reset " # "
+    print -n --green (pwd -t) --reset " # "
 end
 ```
 
@@ -308,7 +308,7 @@ print --blue "info:" --reset "Server started on port" --cyan "8080"
 
 # Styled text
 print --bold "Important:" --reset "Read carefully"
-print --dim "Last updated: $(date)"
+print --dim "Last updated: "(date)
 
 # Combining styles
 print --bold --red "ERROR" --reset "Connection refused"
@@ -682,7 +682,7 @@ Schedule cleanup commands that run automatically when a function exits. Inspired
 
 ```sh
 fun with_tempdir
-    var tmpdir $(mktemp -d)
+    var tmpdir (mktemp -d)
     defer rm -rf $tmpdir           # Runs when function exits
 
     print "Working in $tmpdir"
@@ -719,7 +719,7 @@ Deferred commands run even when returning early:
 
 ```sh
 fun safe_process
-    var tmpfile $(mktemp)
+    var tmpfile (mktemp)
     defer rm $tmpfile
 
     if test ! -f input.txt
@@ -809,21 +809,38 @@ for f in $files
 end
 ```
 
+> **Tip:** Output capture (`=>`) is great for simple assignments. For inline use, prefer bare parens: `var files (ls *.txt)`
+
 ---
 
 ## Command Substitution
 
-Inline capture using `$(...)`:
+Capture command output inline using `(...)` or `$(...)`:
 
 ```sh
-print "Today is $(date +%A)"
-set files $(ls *.txt)
+print "Today is "(date +%A)
+var files (ls *.txt)
 
 # Multi-line output becomes a list
-for f in $(ls)
+for f in (ls)
     print "- $f"
 end
 ```
+
+### Bare Parens vs Dollar Parens
+
+Both syntaxes work, with a subtle difference:
+
+```sh
+# Bare parens - clean, fish-style (preferred for concatenation)
+echo (whoami)                    # hello
+echo "user: "(whoami)            # user: alice  (concat outside quotes)
+
+# Dollar parens - works inside quotes
+echo "user: $(whoami)"           # user: alice  (interpolated inside quotes)
+```
+
+Use bare `(...)` for cleaner code. Use `$(...)` when you need interpolation inside double quotes.
 
 ---
 
@@ -978,6 +995,7 @@ Both syntaxes work—choose based on readability preference!
 | `pwd [-t]` | Print working directory (`-t`: replace $HOME with ~) |
 | `var` / `set `[name [values...]]` | Get/set shell variables |
 | `source <file>` | Execute file in current shell |
+| `math <expr>` | Evaluate arithmetic expression (+ - * / %) |
 | `test <expr>` / `[ <expr> ]` | Evaluate conditional expression |
 | `true` | Return success (exit 0) |
 | `type <name>...` | Show how a name resolves (alias/builtin/function/external) |
@@ -1031,6 +1049,74 @@ if [ "$x" = "yes" ]; print "x is yes"; end
 var count 5
 if [ $count -gt 0 ]; print "count is positive"; end
 ```
+
+### Math Expressions
+
+The `math` builtin evaluates arithmetic expressions:
+
+```sh
+math 2 + 3                       # 5
+math 10 - 3                      # 7
+math 20 / 4                      # 5 (integer division)
+math 17 % 5                      # 2 (modulo)
+```
+
+#### Quoting and Escaping
+
+Since `*` triggers glob expansion and `(` triggers command substitution, you need to quote or escape them:
+
+```sh
+# Quote the expression (recommended for complex expressions)
+math "4 * 5"                     # 20
+math "(2 + 3) * 4"               # 20
+
+# Or escape individual characters
+math 4 \* 5                      # 20
+math \(2 + 3\) \* 4              # 20
+```
+
+#### Operator Precedence
+
+Multiplication, division, and modulo bind tighter than addition/subtraction:
+
+```sh
+math "2 + 3 * 4"                 # 14 (not 20)
+math "(2 + 3) * 4"               # 20 (parens override)
+```
+
+#### With Variables and Loops
+
+Combine with bare paren capture for clean arithmetic:
+
+```sh
+var x 5
+var y (math $x + 3)              # y = 8
+
+# Countdown loop
+var count 5
+while test $count -gt 0
+    print "Countdown: $count"
+    var count (math $count - 1)
+end
+
+# Sum a list
+var sum 0
+for i in 1 2 3 4 5
+    var sum (math $sum + $i)
+end
+print "Sum: $sum"                # Sum: 15
+```
+
+#### Supported Operators
+
+| Operator | Description |
+|----------|-------------|
+| `+` | Addition |
+| `-` | Subtraction (also unary minus) |
+| `*` | Multiplication |
+| `/` | Integer division |
+| `%` | Modulo |
+| `()` | Grouping |
 
 ---
 

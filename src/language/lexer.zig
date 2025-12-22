@@ -204,6 +204,24 @@ pub const Lexer = struct {
         try buf.appendSlice(self.allocator, "$(");
         self.advanceBy(2); // skip `$(`
 
+        try self.readParenContent(buf);
+    }
+
+    /// Reads a bare command substitution `(...)` and normalizes to `$(...)`.
+    /// Assumes we're positioned at the opening `(`.
+    fn readBareCommandSubstitution(self: *Lexer, buf: *std.ArrayListUnmanaged(u8)) (error{OutOfMemory} || LexError)!void {
+        std.debug.assert(self.peek() == '(');
+
+        // Normalize to $(...) so expander can use the same logic
+        try buf.appendSlice(self.allocator, "$(");
+        self.advance(); // skip `(`
+
+        try self.readParenContent(buf);
+    }
+
+    /// Reads the content inside parentheses with nested paren matching.
+    /// Assumes we're positioned after the opening `(` and `$(` has been written.
+    fn readParenContent(self: *Lexer, buf: *std.ArrayListUnmanaged(u8)) (error{OutOfMemory} || LexError)!void {
         var depth: usize = 1;
         while (self.peek()) |ch| {
             switch (ch) {
@@ -295,6 +313,10 @@ pub const Lexer = struct {
                         try buf.append(self.allocator, c);
                         self.advance();
                     }
+                },
+                '(' => {
+                    // Bare paren command substitution: (cmd) → normalized to $(cmd)
+                    try self.readBareCommandSubstitution(buf);
                 },
                 else => {
                     try buf.append(self.allocator, c);
@@ -495,6 +517,48 @@ test "Command substitution: nested" {
 
     try testing.expectEqual(@as(usize, 2), tokens.len);
     try expectBareWord(tokens[1].kind.word, "$(dirname $(pwd))");
+}
+
+test "Bare paren command substitution: basic" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    const tokens = try tokenizeTest(&arena, "echo (whoami)");
+
+    try testing.expectEqual(@as(usize, 2), tokens.len);
+    // Bare parens get normalized to $(...)
+    try expectBareWord(tokens[1].kind.word, "$(whoami)");
+}
+
+test "Bare paren command substitution: nested" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    const tokens = try tokenizeTest(&arena, "echo (dirname (pwd))");
+
+    try testing.expectEqual(@as(usize, 2), tokens.len);
+    try expectBareWord(tokens[1].kind.word, "$(dirname (pwd))");
+}
+
+test "Bare paren command substitution: with pipe" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    const tokens = try tokenizeTest(&arena, "echo (ls | head)");
+
+    try testing.expectEqual(@as(usize, 2), tokens.len);
+    // Pipe should be captured inside the parens, not as separate operator
+    try expectBareWord(tokens[1].kind.word, "$(ls | head)");
+}
+
+test "Bare paren command substitution: concatenation" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    const tokens = try tokenizeTest(&arena, "file_(date).txt");
+
+    try testing.expectEqual(@as(usize, 1), tokens.len);
+    try expectBareWord(tokens[0].kind.word, "file_$(date).txt");
 }
 
 test "Operators: pipe" {
