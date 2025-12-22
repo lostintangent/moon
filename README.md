@@ -1,12 +1,11 @@
 # 🌊 Oshen
 
-A modern shell with a clean syntax, and the most common batteries included:
+A modern shell with a clean syntax and a great developer experience out-of-the-box:
 
-- **No config required** — Syntax highlighting, ghost text, completions, and a nice prompt. Out-of-the-box.
-- **Clean syntax** — `if`/`for`/`fun`/`defer` end with `end`, no cryptic `fi` or `esac`.
-- **Colored output** — `print --green "✓ done"` without remembering ANSI codes.
-- **Variables are lists** — No word-splitting surprises, `$files` works exactly how you'd expect.
-- **Safe by default** — Undefined variables fail loudly, not silently
+- **Zero-setup REPL** — Syntax highlighting, ghost text, completions, and a beautiful default prompt.
+- **Clean syntax** — Familiar control flow with script-friendly ergonomics, plus [`defer`](#defer) for automatic cleanup.
+- **Lists by default** — Variables, [globs](#glob-patterns), and [brace expansion](#brace-expansion) all produce lists, which can be enumerated, indexed, or sliced.
+- **Modern builtins** — [Colored output](#colored-output-with-print) with `print --green`, [output capture](#output-capture) with `=>`, and [`path_prepend`](#path_prepend) that deduplicates.
 
 ---
 
@@ -19,7 +18,10 @@ brew tap lostintangent/oshen https://github.com/lostintangent/oshen
 brew install lostintangent/oshen/oshen
 ```
 
-### Linux
+> [!TIP]
+> And when you want to grab an [update](https://github.com/lostintangent/oshen/releases) later, simply run `brew upgrade lostintangent/oshen/oshen`.
+
+### Linux / WSL
 
 Download the latest release:
 
@@ -29,7 +31,7 @@ tar -xzf oshen-linux-x86_64.tar.gz
 sudo mv oshen /usr/local/bin/
 ```
 
-### Set as Default Shell (Seriously, don't do this)
+### Set as Default Shell
 
 ```sh
 # Add to /etc/shells
@@ -48,7 +50,7 @@ chsh -s $(which oshen)
 oshen
 
 # Run a command
-oshen -c "print --magenta hello --green world"
+oshen -c "print --magenta hello world"
 
 # Run a script
 oshen script.wave
