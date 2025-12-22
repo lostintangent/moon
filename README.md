@@ -1,18 +1,14 @@
 # 🌊 Oshen
 
-A modern shell with a clean syntax and batteries included.
+A modern shell with a clean syntax, and the most common batteries included:
 
-**Why Oshen?**
-- **No config required** — Syntax highlighting, autosuggestions, and completions work out of the box
-- **Variables are lists** — No word-splitting surprises, `$files` just works
-- **Clean syntax** — `if`/`for`/`fun`/`defer` end with `end`, no cryptic `fi` or `esac`
-- **Colored output** — `print --green "✓ done"` without remembering ANSI codes
+- **No config required** — Syntax highlighting, ghost text, completions, and a nice prompt. Out-of-the-box.
+- **Clean syntax** — `if`/`for`/`fun`/`defer` end with `end`, no cryptic `fi` or `esac`.
+- **Colored output** — `print --green "✓ done"` without remembering ANSI codes.
+- **Variables are lists** — No word-splitting surprises, `$files` works exactly how you'd expect.
 - **Safe by default** — Undefined variables fail loudly, not silently
 
 ---
-
-> [!WARNING] 
-> I built Oshen entirely for myself. And while it's capable enough to be a daily driver, its major limitation is a lack of integration with other tools that don't "speak" Oshen script (e.g. Homebrew, NVM, VS Code, etc.). Therefore, before I'd recommend anyone use this, I probably need to support a subset of Bash/Zsh/Fish, to allow Oshen to inherit existing support from tools.
 
 ## Installation
 
@@ -52,7 +48,7 @@ chsh -s $(which oshen)
 oshen
 
 # Run a command
-oshen -c "echo hello world"
+oshen -c "print --magenta hello --green world"
 
 # Run a script
 oshen script.wave
