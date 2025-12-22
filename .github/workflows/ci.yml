@@ -24,5 +24,8 @@ jobs:
       - name: Build
         run: zig build
 
-      - name: Test
+      - name: Unit Tests
         run: zig build test
+
+      - name: E2E Tests
+        run: ./zig-out/bin/oshen scripts/e2e.wave

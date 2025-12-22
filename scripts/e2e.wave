@@ -60,7 +60,7 @@ end
 # ============================================================================
 # Basic Variables
 # ============================================================================
-print_header "Basic Variables (10 tests)"
+print_header "Basic Variables (11 tests)"
 
 test_case "Simple variable" "var x hello; echo \$x" "hello"
 test_case "Multi-value variable" "var colors red green blue; echo \$colors" "red green blue"
@@ -72,6 +72,7 @@ test_case "Numeric variable" "var num 42; echo \$num" "42"
 test_case "Negative number" "var num -42; echo \$num" "-42"
 test_case "Variable with underscore" "var my_var test; echo \$my_var" "test"
 test_case "Unset variable" "var x hello; unset x; echo [\$x]" "[]"
+test_exit_code "Set query nonexistent returns 1" "set NONEXISTENT_VAR_12345" "1"
 
 # ============================================================================
 # Environment Variables
@@ -177,7 +178,7 @@ test_exit_code "Test not equal" "test 1 -ne 2" "0"
 # ============================================================================
 # Loops (For/While)
 # ============================================================================
-print_header "Loops (7 tests)"
+print_header "Loops (9 tests)"
 
 test_case "For loop empty list" "for x in ; echo \$x; end" ""
 test_case "For loop single item" "for x in single; echo \$x; end" "single"
@@ -186,6 +187,8 @@ test_case "Empty for body" "for x in a b c; end; echo done" "done"
 test_case "While false" "while false; echo never; end; echo done" "done"
 test_exit_code "For loop runs" "for x in a b c; echo \$x; end" "0"
 test_exit_code "While with break" "var i 0; while true; var i 1; break; end" "0"
+test_exit_code "Continue skips iteration" "for x in 1 2 3; if test \$x = 2; continue; end; echo \$x; end" "0"
+test_case "Continue outputs correct values" "for x in a b c; if test \$x = b; continue; end; echo -n \$x; end" "ac"
 
 # ============================================================================
 # Functions
@@ -346,19 +349,28 @@ run_file_tests
 # ============================================================================
 # Source Builtin
 # ============================================================================
-print_header "Source Builtin (3 tests)"
+print_header "Source Builtin (4 tests)"
 
 fun run_source_tests
     var testfile1 /tmp/oshen_source_test.wave
     var testfile2 /tmp/oshen_source_test2.wave
-    defer rm -f $testfile1 $testfile2
+    var testfile3 /tmp/oshen_source_test3.wave
+    defer rm -f $testfile1 $testfile2 $testfile3
 
     echo "var SOURCED_VAR sourced_value" > $testfile1
     echo "var SOURCED_A 1" > $testfile2
     echo "var SOURCED_B 2" >> $testfile2
 
+    # File with comments and empty lines
+    echo "# This is a comment" > $testfile3
+    echo "" >> $testfile3
+    echo "var COMMENT_VAR1 value1" >> $testfile3
+    echo "# Another comment" >> $testfile3
+    echo "var COMMENT_VAR2 value2" >> $testfile3
+
     test_case "Source sets variable" "source $testfile1; echo \$SOURCED_VAR" "sourced_value"
     test_case "Source multiple vars" "source $testfile2; echo \$SOURCED_A \$SOURCED_B" "1 2"
+    test_case "Source skips comments" "source $testfile3; echo \$COMMENT_VAR1 \$COMMENT_VAR2" "value1 value2"
     test_exit_code "Source nonexistent fails" "source /tmp/nonexistent_file_12345.wave" "1"
 end
 run_source_tests
