@@ -6,38 +6,31 @@ var PASS 0
 var FAIL 0
 var TOTAL 0
 
-# ANSI color codes
-var GREEN "\e[32m"
-var RED "\e[31m"
-var BLUE "\e[34m"
-var NC "\e[0m"
-
 fun print_header
-    echo ""
-    echo -n $BLUE
-    echo "═══════════════════════════════════════════════════════════"
-    echo "  $1"
-    echo "═══════════════════════════════════════════════════════════"
-    echo -n $NC
+    print ""
+    print --blue "═══════════════════════════════════════════════════════════"
+    print --blue "  $1"
+    print --blue "═══════════════════════════════════════════════════════════"
 end
 
 fun test_case
     var name $1
     var cmd $2
-    var expected $3
+    # Interpret escape sequences in expected value
+    echo -n $3 => expected
 
     set TOTAL $(expr $TOTAL + 1)
     eval "$cmd" => output
 
     if test "$output" = "$expected"
-        echo -n "$GREEN✓$NC "
-        echo "$name"
+        print -n --green "✓ "
+        print "$name"
         set PASS $(expr $PASS + 1)
     else
-        echo -n "$RED✗$NC "
-        echo "$name"
-        echo "  Expected: '$expected'"
-        echo "  Got:      '$output'"
+        print -n --red "✗ "
+        print "$name"
+        print "  Expected: '$expected'"
+        print "  Got:      '$output'"
         set FAIL $(expr $FAIL + 1)
     end
 end
@@ -52,14 +45,14 @@ fun test_exit_code
     var exit_code $status
 
     if test $exit_code = $expected_code
-        echo -n "$GREEN✓$NC "
-        echo "$name"
+        print -n --green "✓ "
+        print "$name"
         set PASS $(expr $PASS + 1)
     else
-        echo -n "$RED✗$NC "
-        echo "$name"
-        echo "  Expected exit: $expected_code"
-        echo "  Got exit:      $exit_code"
+        print -n --red "✗ "
+        print "$name"
+        print "  Expected exit: $expected_code"
+        print "  Got exit:      $exit_code"
         set FAIL $(expr $FAIL + 1)
     end
 end
@@ -300,12 +293,12 @@ cd /usr
 cd -
 var prev_worked $?
 if test $prev_worked -eq 0
-    echo -n "$GREEN✓$NC "
-    echo "CD - returns to previous"
+    print -n --green "✓ "
+    print "CD - returns to previous"
     var PASS $(expr $PASS + 1)
 else
-    echo -n "$RED✗$NC "
-    echo "CD - returns to previous"
+    print -n --red "✗ "
+    print "CD - returns to previous"
     var FAIL $(expr $FAIL + 1)
 end
 var TOTAL $(expr $TOTAL + 1)
@@ -484,6 +477,36 @@ test_case "Pipeline with multiple stages" "printf '1\n2\n3\n4\n5\n' | head -n 3 
 test_case "Capture in conditional" "echo 5 => num; if test \$num -eq 5; echo match; end" "match"
 
 # ============================================================================
+# Print Builtin (Colored Output)
+# ============================================================================
+print_header "Print Builtin (13 tests)"
+
+# Basic echo-like behavior (print always appends reset code)
+test_case "Print simple text" "print hello" "hello\e[0m"
+test_case "Print multiple args" "print hello world" "hello world\e[0m"
+test_case "Print -n no newline" "print -n test; echo done" "test\e[0mdone"
+
+# Color output - test that ANSI codes are included
+test_case "Print green text" 'print --green ok' "\e[32mok\e[0m"
+test_case "Print red text" 'print --red error' "\e[31merror\e[0m"
+test_case "Print yellow text" 'print --yellow warn' "\e[33mwarn\e[0m"
+test_case "Print blue text" 'print --blue info' "\e[34minfo\e[0m"
+
+# Style flags
+test_case "Print bold text" 'print --bold important' "\e[1mimportant\e[0m"
+test_case "Print dim text" 'print --dim subtle' "\e[2msubtle\e[0m"
+
+# Interleaved colors
+test_case "Print interleaved colors" 'print --green ok --reset normal' "\e[32mok\e[0m normal\e[0m"
+
+# Combined styles
+test_case "Print bold and red" 'print --bold --red error' "\e[1m\e[31merror\e[0m"
+
+# Aliases and additional colors
+test_case "Print purple (magenta alias)" 'print --purple text' "\e[35mtext\e[0m"
+test_case "Print gray text" 'print --gray muted' "\e[90mmuted\e[0m"
+
+# ============================================================================
 # Defer Statements
 # ============================================================================
 print_header "Defer Statements (6 tests)"
@@ -508,32 +531,25 @@ test_exit_code "Defer preserves exit status" "fun f; defer echo cleanup; return 
 # Print Summary
 # ============================================================================
 
-echo ""
-echo "═══════════════════════════════════════════════════════════"
-echo "                      TEST SUMMARY"
-echo "═══════════════════════════════════════════════════════════"
-echo ""
-echo "Total Tests:  $TOTAL"
-echo -n "$GREEN"
-echo "Passed:       $PASS"
-echo -n "$RED"
-echo "Failed:       $FAIL"
-echo -n "$NC"
-echo ""
+print ""
+print "═══════════════════════════════════════════════════════════"
+print "                      TEST SUMMARY"
+print "═══════════════════════════════════════════════════════════"
+print ""
+print "Total Tests:  $TOTAL"
+print --green "Passed:       $PASS"
+print --red "Failed:       $FAIL"
+print ""
 
 # Calculate pass rate (using * without escape for oshen)
 var PASS_RATE $(expr $PASS '*' 100 / $TOTAL)
-echo "Pass Rate: $PASS_RATE%"
-echo ""
+print "Pass Rate: $PASS_RATE%"
+print ""
 
 if test $FAIL -eq 0
-    echo -n "$GREEN"
-    echo "🎉 All tests passed!"
-    echo -n "$NC"
+    print --green "🎉 All tests passed!"
     exit 0
 else
-    echo -n "$YELLOW"
-    echo "⚠️  Some tests failed."
-    echo -n "$NC"
+    print --yellow "⚠️  Some tests failed."
     exit 1
 end

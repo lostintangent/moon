@@ -1,8 +1,13 @@
 # 🌊 Oshen
 
-A terminal shell that's optimized for fun, yet powerful enough to be a daily driver.
+A modern shell with a clean syntax and batteries included.
 
-Oshen ships with the features developers expect out of the box: syntax highlighting, autosuggestions, and tab completions. Variables are lists, syntax is clean, and there's no surprise word-splitting.
+**Why Oshen?**
+- **No config required** — Syntax highlighting, autosuggestions, and completions work out of the box
+- **Variables are lists** — No word-splitting surprises, `$files` just works
+- **Clean syntax** — `if`/`for`/`fun`/`defer` end with `end`, no cryptic `fi` or `esac`
+- **Colored output** — `print --green "✓ done"` without remembering ANSI codes
+- **Safe by default** — Undefined variables fail loudly, not silently
 
 ---
 
@@ -265,24 +270,65 @@ To customize this, define a function named `prompt`. The function's stdout becom
 ```sh
 # Simple custom prompt
 fun prompt
-    echo "oshen > "
+    print "oshen > "
 end
 
 # Show git branch
 fun prompt
     var branch $(git branch --show-current 2>/dev/null)
     if test -n "$branch"
-        echo "[$branch] $ "
+        print "[$branch] $ "
     else
-        echo "$ "
+        print "$ "
     end
 end
 
 # Colorful prompt with path
 fun prompt
-    echo "\e[32m$(pwd -t)\e[0m # "
+    print -n --green "$(pwd -t)" --reset " # "
 end
 ```
+
+---
+
+## Colored Output with `print`
+
+The `print` builtin works like `echo` but supports inline color flags for expressive terminal output:
+
+```sh
+# Simple text
+print "Hello, world!"
+
+# Colored output
+print --green "✓ Build succeeded"
+print --red "✗ Build failed"
+print --yellow "⚠ Warning: disk space low"
+
+# Interleaved colors in one line
+print --green "PASS" --reset "tests/unit.zig"
+print --blue "info:" --reset "Server started on port" --cyan "8080"
+
+# Styled text
+print --bold "Important:" --reset "Read carefully"
+print --dim "Last updated: $(date)"
+
+# Combining styles
+print --bold --red "ERROR" --reset "Connection refused"
+
+# In scripts
+if zig build
+    print --green "✓" --reset "Build completed"
+else
+    print --red "✗" --reset "Build failed"
+end
+```
+
+**Supported flags:**
+- Colors: `--red`, `--green`, `--yellow`, `--blue`, `--magenta`, `--purple`, `--cyan`, `--gray`
+- Styles: `--bold`, `--dim`, `--reset`
+- Options: `-n` (no newline)
+
+Colors auto-reset at the end of each `print`—no need to add `--reset` at the end.
 
 ---
 
@@ -356,8 +402,8 @@ Commonly used to access function arguments:
 
 ```sh
 fun greet
-    echo "Hello, $argv[1]!"
-    echo "Remaining args: $argv[2..]"
+    print "Hello, $argv[1]!"
+    print "Remaining args: $argv[2..]"
 end
 
 greet Alice Bob Carol
@@ -388,10 +434,10 @@ Inside functions, access arguments by position:
 
 ```sh
 fun greet
-    echo "Hello, $1!"       # First argument
-    echo "You said: $2"     # Second argument
-    echo "All args: $*"     # All arguments
-    echo "Count: $#"        # Number of arguments
+    print "Hello, $1!"       # First argument
+    print "You said: $2"     # Second argument
+    print "All args: $*"     # All arguments
+    print "Count: $#"        # Number of arguments
 end
 
 greet Alice "good morning"
@@ -471,13 +517,13 @@ echo hello  # inline comment
 
 ```sh
 if test -f config.txt
-    echo "Config found"
+    print "Config found"
 else
-    echo "No config"
+    print "No config"
 end
 
 # Inline form
-if test $x -eq 0; echo "zero"; end
+if test $x -eq 0; print "zero"; end
 ```
 
 The condition is any command — exit status 0 means true.
@@ -490,13 +536,13 @@ Use `else if` to chain multiple conditions:
 var x 15
 
 if test $x -lt 10
-    echo "small"
+    print "small"
 else if test $x -lt 20
-    echo "medium"
+    print "medium"
 else if test $x -lt 100
-    echo "large"
+    print "large"
 else
-    echo "huge"
+    print "huge"
 end
 ```
 
@@ -510,17 +556,17 @@ Iterate over items:
 
 ```sh
 for file in *.txt
-    echo "Processing $file"
+    print "Processing $file"
 end
 
 # Loop over a variable list
 var names Alice Bob Carol
 for name in $names
-    echo "Hello, $name"
+    print "Hello, $name"
 end
 
 # Inline form
-for x in a b c; echo $x; end
+for x in a b c; print $x; end
 ```
 
 ---
@@ -532,18 +578,18 @@ Repeat while a condition is true:
 ```sh
 var count 5
 while test $count -gt 0
-    echo "Countdown: $count"
+    print "Countdown: $count"
     var count (math $count - 1)
 end
 
 # Wait for a file to appear
 while test ! -f ready.txt
-    echo "Waiting..."
+    print "Waiting..."
     sleep 1
 end
 
 # Inline form
-while true; echo "loop"; end
+while true; print "loop"; end
 ```
 
 The condition is any command — exit status 0 means continue.
@@ -560,7 +606,7 @@ Exit the loop immediately:
 
 ```sh
 for i in 1 2 3 4 5
-    echo $i
+    print $i
     if test $i -eq 3
         break
     end
@@ -577,7 +623,7 @@ for i in 1 2 3 4 5
     if test $i -eq 3
         continue
     end
-    echo $i
+    print $i
 end
 # Output: 1 2 4 5
 ```
@@ -589,12 +635,12 @@ Both `break` and `continue` work in `for` and `while` loops.
 ## Conditional Chaining
 
 ```sh
-test -f file.txt && echo "exists"
-test -f file.txt || echo "missing"
+test -f file.txt && print "exists"
+test -f file.txt || print "missing"
 
 # Word forms
-test -f file.txt and echo "exists"
-test -f file.txt or  echo "missing"
+test -f file.txt and print "exists"
+test -f file.txt or  print "missing"
 ```
 
 ---
@@ -605,13 +651,13 @@ Define reusable commands:
 
 ```sh
 fun greet
-    echo "Hello, $argv[1]!"
+    print "Hello, $argv[1]!"
 end
 
 greet Alice                  # Hello, Alice!
 
 # Inline definition (single statement)
-fun hi; echo "Hi there"; end
+fun hi; print "Hi there"; end
 ```
 
 Functions receive arguments in `$argv`. Use `return` to exit early with a specific exit code:
@@ -641,7 +687,7 @@ fun with_tempdir
     var tmpdir $(mktemp -d)
     defer rm -rf $tmpdir           # Runs when function exits
 
-    echo "Working in $tmpdir"
+    print "Working in $tmpdir"
     cp *.txt $tmpdir
     tar -czf archive.tar.gz $tmpdir
 end
@@ -655,10 +701,10 @@ Multiple defers execute in reverse order (last in, first out):
 
 ```sh
 fun setup_and_teardown
-    defer echo "3. final cleanup"
-    defer echo "2. close connection"
-    defer echo "1. release lock"
-    echo "doing work..."
+    defer print "3. final cleanup"
+    defer print "2. close connection"
+    defer print "1. release lock"
+    print "doing work..."
 end
 
 setup_and_teardown
@@ -748,10 +794,10 @@ Capture command output directly into variables:
 
 ```sh
 git rev-parse --short HEAD => sha
-echo "Current commit: $sha"
+print "Current commit: $sha"
 
 whoami => user
-echo "Logged in as $user"
+print "Logged in as $user"
 ```
 
 ### Lines Capture (`=>@`)
@@ -761,7 +807,7 @@ Split output into a list (one item per line):
 ```sh
 ls *.txt =>@ files
 for f in $files
-    echo "File: $f"
+    print "File: $f"
 end
 ```
 
@@ -772,12 +818,12 @@ end
 Inline capture using `$(...)`:
 
 ```sh
-echo "Today is $(date +%A)"
+print "Today is $(date +%A)"
 set files $(ls *.txt)
 
 # Multi-line output becomes a list
 for f in $(ls)
-    echo "- $f"
+    print "- $f"
 end
 ```
 
@@ -923,6 +969,7 @@ Both syntaxes work—choose based on readability preference!
 | `bg [n]` | Resume job in background |
 | `cd [dir]` | Change directory (`cd` alone goes home, `cd -` returns to previous) |
 | `echo [-n] [args...]` | Print arguments (`-n`: no newline, supports `\e` for ESC) |
+| `print [-n] [--color]... [text]...` | Print with colors (`--green`, `--red`, `--yellow`, `--blue`, `--magenta`, `--purple`, `--cyan`, `--gray`, `--bold`, `--dim`, `--reset`) |
 | `eval [code...]` | Execute arguments as shell code |
 | `exit [code]` | Exit shell with optional status |
 | `export [name [value]]` \| `[name=value]` | Export to environment |
@@ -975,16 +1022,16 @@ The `test` builtin (and its `[` alias) evaluates conditional expressions:
 
 ```sh
 # File tests
-if test -f config.json; echo "config exists"; end
-if [ -d ~/.config ]; echo "config dir exists"; end
+if test -f config.json; print "config exists"; end
+if [ -d ~/.config ]; print "config dir exists"; end
 
 # String tests
-if test -n "$name"; echo "name is set"; end
-if [ "$x" = "yes" ]; echo "x is yes"; end
+if test -n "$name"; print "name is set"; end
+if [ "$x" = "yes" ]; print "x is yes"; end
 
 # Numeric tests
 var count 5
-if [ $count -gt 0 ]; echo "count is positive"; end
+if [ $count -gt 0 ]; print "count is positive"; end
 ```
 
 ---

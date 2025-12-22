@@ -37,6 +37,7 @@ const true_builtin = @import("builtins/true.zig");
 const false_builtin = @import("builtins/false.zig");
 const type_builtin = @import("builtins/type.zig");
 const echo_builtin = @import("builtins/echo.zig");
+const print_builtin = @import("builtins/print.zig");
 const alias_builtin = @import("builtins/alias.zig");
 const unalias_builtin = @import("builtins/unalias.zig");
 const test_builtin = @import("builtins/test.zig");
@@ -60,6 +61,7 @@ const all_builtins = [_]Builtin{
     false_builtin.builtin,
     type_builtin.builtin,
     echo_builtin.builtin,
+    print_builtin.builtin,
     alias_builtin.builtin,
     unalias_builtin.builtin,
     test_builtin.builtin,
