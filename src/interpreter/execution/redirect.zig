@@ -4,10 +4,10 @@
 //! by opening files and using dup2() to redirect standard file descriptors.
 
 const std = @import("std");
-const ast = @import("../../language/ast.zig");
+const expansion_types = @import("../expansion/expanded.zig");
 const io = @import("../../terminal/io.zig");
 
-const Redirect = ast.Redirect;
+const ExpandedRedirect = expansion_types.ExpandedRedirect;
 
 /// Open a file and dup2 it to target fd
 fn openAndDup(path: []const u8, flags: std.posix.O, mode: std.posix.mode_t, target_fd: u8) !void {
@@ -21,7 +21,7 @@ fn openAndDup(path: []const u8, flags: std.posix.O, mode: std.posix.mode_t, targ
 
 /// Apply file redirections for a command (called in child process)
 /// Redirections are applied in order, which matters for cases like `>out 2>&1`
-pub fn apply(redirs: []const Redirect) !void {
+pub fn apply(redirs: []const ExpandedRedirect) !void {
     for (redirs) |redir| {
         switch (redir.kind) {
             .read => |path| {

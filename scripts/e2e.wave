@@ -378,7 +378,7 @@ run_source_tests
 # ============================================================================
 # Redirections
 # ============================================================================
-print_header "Redirections (6 tests)"
+print_header "Redirections (9 tests)"
 
 fun run_redir_tests
     var testdir /tmp/oshen_redir_test
@@ -391,6 +391,12 @@ fun run_redir_tests
     test_case "Redirect overwrite" "echo first > $testdir/over.txt; echo second > $testdir/over.txt; cat $testdir/over.txt" "second"
     test_case "Redirect to /dev/null" "echo hidden > /dev/null; echo shown" "shown"
     test_case "Redirect in pipeline" "echo data | cat > $testdir/pipe.txt; cat $testdir/pipe.txt" "data"
+
+    # Quoted redirect paths
+    test_case "Redirect quoted path with spaces" "echo test > \"$testdir/foo bar.txt\"; cat \"$testdir/foo bar.txt\"" "test"
+    test_case "Redirect variable path" "var outfile $testdir/varfile.txt; echo vardata > \$outfile; cat \$outfile" "vardata"
+    test_case "Redirect double-quoted var" "var name myout; echo content > \"$testdir/\$name.txt\"; cat $testdir/myout.txt" "content"
+    test_case "Redirect single-quoted no expand" "var dollar literal; echo nope > '$testdir/literal.txt'; cat $testdir/literal.txt" "nope"
 end
 run_redir_tests
 

@@ -28,6 +28,8 @@ const WordPart = token_types.WordPart;
 const CaptureMode = ast.CaptureMode;
 
 const ExpandedCmd = expansion_types.ExpandedCmd;
+const ExpandedRedirect = expansion_types.ExpandedRedirect;
+const ExpandedRedirectKind = expansion_types.ExpandedRedirectKind;
 const Capture = expansion_types.Capture;
 
 pub const ExpandError = error{
@@ -67,9 +69,9 @@ fn expandCommand(allocator: std.mem.Allocator, ctx: *expand.ExpandContext, cmd: 
 
     const expanded_argv = try expand.expandWords(ctx, words_with_alias);
 
-    var redir_expanded: std.ArrayListUnmanaged(ast.Redirect) = .empty;
+    var redir_expanded: std.ArrayListUnmanaged(ExpandedRedirect) = .empty;
     for (cmd.redirects) |redir| {
-        const redir_result = try expandRedirect(allocator, ctx, redir);
+        const redir_result = try expandRedirect(ctx, redir);
         try redir_expanded.append(allocator, redir_result);
     }
 
@@ -119,37 +121,28 @@ fn applyAliasExpansion(allocator: std.mem.Allocator, ctx: *expand.ExpandContext,
 // Redirect and Helper Functions
 // =============================================================================
 
-fn expandRedirect(allocator: std.mem.Allocator, ctx: *expand.ExpandContext, redirect: Redirect) (ExpandError || expand.ExpandError || std.mem.Allocator.Error)!ast.Redirect {
-    const expanded_kind: ast.RedirectKind = switch (redirect.kind) {
+fn expandRedirect(ctx: *expand.ExpandContext, redirect: Redirect) (ExpandError || expand.ExpandError || std.mem.Allocator.Error)!ExpandedRedirect {
+    const expanded_kind: ExpandedRedirectKind = switch (redirect.kind) {
         .dup => |to_fd| .{ .dup = to_fd },
-        .read => |path| .{ .read = try expandPath(allocator, ctx, path) },
-        .write_truncate => |path| .{ .write_truncate = try expandPath(allocator, ctx, path) },
-        .write_append => |path| .{ .write_append = try expandPath(allocator, ctx, path) },
+        .read => |parts| .{ .read = try expandPathParts(ctx, parts) },
+        .write_truncate => |parts| .{ .write_truncate = try expandPathParts(ctx, parts) },
+        .write_append => |parts| .{ .write_append = try expandPathParts(ctx, parts) },
     };
 
-    return ast.Redirect{
+    return ExpandedRedirect{
         .from_fd = redirect.from_fd,
         .kind = expanded_kind,
     };
 }
 
-fn expandPath(allocator: std.mem.Allocator, ctx: *expand.ExpandContext, path: []const u8) (ExpandError || expand.ExpandError || std.mem.Allocator.Error)![]const u8 {
-    // Tokenize the path string and expand it
-    var lexer = lexer_mod.Lexer.init(allocator, path);
-    const tokens = lexer.tokenize() catch {
-        // If tokenization fails, use the literal value
-        return path;
-    };
-
-    if (tokens.len > 0 and tokens[0].kind == .word) {
-        const expanded_values = try expand.expandWord(ctx, tokens[0].kind.word);
-        if (expanded_values.len > 0) {
-            return expanded_values[0];
-        }
+/// Expand word parts for a redirect path, returning the first expanded value.
+/// Respects quoting: single-quoted stays literal, double-quoted expands vars, bare expands all.
+fn expandPathParts(ctx: *expand.ExpandContext, parts: []const WordPart) (ExpandError || expand.ExpandError || std.mem.Allocator.Error)![]const u8 {
+    const expanded_values = try expand.expandWord(ctx, parts);
+    if (expanded_values.len > 0) {
+        return expanded_values[0];
     }
-
-    // Fall back to literal path
-    return path;
+    return "";
 }
 
 fn expandAssignmentValue(allocator: std.mem.Allocator, ctx: *expand.ExpandContext, value: []const u8) (ExpandError || expand.ExpandError || std.mem.Allocator.Error)![]const u8 {
@@ -297,4 +290,107 @@ test "background preserved" {
     const prog = try expandInput(arena.allocator(), "sleep 10 &");
 
     try testing.expectEqual(true, prog.statements[0].kind.command.background);
+}
+
+test "redirect: variable expansion in path" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var state = State.init(arena.allocator());
+    defer state.deinit();
+    var ctx = expand.ExpandContext.init(arena.allocator(), &state);
+    defer ctx.deinit();
+
+    const outfile_values = [_][]const u8{"output.txt"};
+    try ctx.setVar("outfile", &outfile_values);
+
+    const prog = try expandInput(arena.allocator(), "echo test > $outfile");
+
+    const ast_pipeline = prog.statements[0].kind.command.chains[0].pipeline;
+    const expanded_cmds = try expandPipeline(arena.allocator(), &ctx, ast_pipeline);
+    const cmd = expanded_cmds[0];
+
+    try testing.expectEqual(@as(usize, 1), cmd.redirects.len);
+    switch (cmd.redirects[0].kind) {
+        .write_truncate => |path| {
+            try testing.expectEqualStrings("output.txt", path);
+        },
+        else => return error.TestExpectedEqual,
+    }
+}
+
+test "redirect: double-quoted path with spaces" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var state = State.init(arena.allocator());
+    defer state.deinit();
+    var ctx = expand.ExpandContext.init(arena.allocator(), &state);
+    defer ctx.deinit();
+
+    const prog = try expandInput(arena.allocator(), "echo test > \"foo bar.txt\"");
+
+    const ast_pipeline = prog.statements[0].kind.command.chains[0].pipeline;
+    const expanded_cmds = try expandPipeline(arena.allocator(), &ctx, ast_pipeline);
+    const cmd = expanded_cmds[0];
+
+    try testing.expectEqual(@as(usize, 1), cmd.redirects.len);
+    switch (cmd.redirects[0].kind) {
+        .write_truncate => |path| {
+            try testing.expectEqualStrings("foo bar.txt", path);
+        },
+        else => return error.TestExpectedEqual,
+    }
+}
+
+test "redirect: single-quoted path prevents expansion" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var state = State.init(arena.allocator());
+    defer state.deinit();
+    var ctx = expand.ExpandContext.init(arena.allocator(), &state);
+    defer ctx.deinit();
+
+    // Set a variable that should NOT be expanded due to single quotes
+    const var_values = [_][]const u8{"should_not_appear"};
+    try ctx.setVar("var", &var_values);
+
+    const prog = try expandInput(arena.allocator(), "echo test > '$var.txt'");
+
+    const ast_pipeline = prog.statements[0].kind.command.chains[0].pipeline;
+    const expanded_cmds = try expandPipeline(arena.allocator(), &ctx, ast_pipeline);
+    const cmd = expanded_cmds[0];
+
+    try testing.expectEqual(@as(usize, 1), cmd.redirects.len);
+    switch (cmd.redirects[0].kind) {
+        .write_truncate => |path| {
+            // Single quotes should preserve the literal $var.txt
+            try testing.expectEqualStrings("$var.txt", path);
+        },
+        else => return error.TestExpectedEqual,
+    }
+}
+
+test "redirect: double-quoted path expands variables" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var state = State.init(arena.allocator());
+    defer state.deinit();
+    var ctx = expand.ExpandContext.init(arena.allocator(), &state);
+    defer ctx.deinit();
+
+    const name_values = [_][]const u8{"myfile"};
+    try ctx.setVar("name", &name_values);
+
+    const prog = try expandInput(arena.allocator(), "echo test > \"$name.txt\"");
+
+    const ast_pipeline = prog.statements[0].kind.command.chains[0].pipeline;
+    const expanded_cmds = try expandPipeline(arena.allocator(), &ctx, ast_pipeline);
+    const cmd = expanded_cmds[0];
+
+    try testing.expectEqual(@as(usize, 1), cmd.redirects.len);
+    switch (cmd.redirects[0].kind) {
+        .write_truncate => |path| {
+            try testing.expectEqualStrings("myfile.txt", path);
+        },
+        else => return error.TestExpectedEqual,
+    }
 }

@@ -229,37 +229,15 @@ pub const Parser = struct {
         const word_tok = self.advance().?;
         const parts = word_tok.kind.word;
 
-        // Join word parts into a single string
-        const target = try joinWordParts(self.allocator, parts);
-
+        // Preserve word parts for proper expansion (respects quoting)
         const kind: RedirectKind = if (op_text[0] == '<')
-            .{ .read = target }
+            .{ .read = parts }
         else if (std.mem.endsWith(u8, op_text, ">>"))
-            .{ .write_append = target }
+            .{ .write_append = parts }
         else
-            .{ .write_truncate = target };
+            .{ .write_truncate = parts };
 
         return Redirect{ .from_fd = fd, .kind = kind };
-    }
-
-    /// Join word parts into a single string (for redirects and assignments)
-    fn joinWordParts(allocator: std.mem.Allocator, parts: []const WordPart) std.mem.Allocator.Error![]const u8 {
-        if (parts.len == 0) return "";
-        if (parts.len == 1) return parts[0].text;
-
-        var total_len: usize = 0;
-        for (parts) |part| {
-            total_len += part.text.len;
-        }
-
-        const result = try allocator.alloc(u8, total_len);
-        var pos: usize = 0;
-        for (parts) |part| {
-            @memcpy(result[pos..][0..part.text.len], part.text);
-            pos += part.text.len;
-        }
-
-        return result;
     }
 
     // =========================================================================
@@ -383,9 +361,9 @@ pub const Parser = struct {
                     if (!self.isOp("if") or self.pos == 0) break :blk false;
                     const prev_tok = self.tokens[self.pos - 1];
                     break :blk prev_tok.kind == .word and
-                           prev_tok.kind.word.len == 1 and
-                           prev_tok.kind.word[0].quotes == .none and
-                           std.mem.eql(u8, prev_tok.kind.word[0].text, "else");
+                        prev_tok.kind.word.len == 1 and
+                        prev_tok.kind.word[0].quotes == .none and
+                        std.mem.eql(u8, prev_tok.kind.word[0].text, "else");
                 };
                 if (!is_else_if) {
                     depth += 1;
@@ -820,8 +798,9 @@ test "Redirections: input and output" {
     const r1 = cmd.redirects[0];
     try testing.expectEqual(@as(u8, 0), r1.from_fd);
     switch (r1.kind) {
-        .read => |path| {
-            try testing.expectEqualStrings("in.txt", path);
+        .read => |parts| {
+            try testing.expectEqual(@as(usize, 1), parts.len);
+            try testing.expectEqualStrings("in.txt", parts[0].text);
         },
         else => return error.TestExpectedEqual,
     }
@@ -830,8 +809,70 @@ test "Redirections: input and output" {
     const r2 = cmd.redirects[1];
     try testing.expectEqual(@as(u8, 1), r2.from_fd);
     switch (r2.kind) {
-        .write_truncate => |path| {
-            try testing.expectEqualStrings("out.txt", path);
+        .write_truncate => |parts| {
+            try testing.expectEqual(@as(usize, 1), parts.len);
+            try testing.expectEqualStrings("out.txt", parts[0].text);
+        },
+        else => return error.TestExpectedEqual,
+    }
+}
+
+test "Redirections: quoted path with spaces" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    const prog = try parseTestNoSource(&arena, "echo test > \"foo bar.txt\"");
+
+    const cmd = prog.statements[0].kind.command.chains[0].pipeline.commands[0];
+    try testing.expectEqual(@as(usize, 1), cmd.redirects.len);
+
+    const r = cmd.redirects[0];
+    try testing.expectEqual(@as(u8, 1), r.from_fd);
+    switch (r.kind) {
+        .write_truncate => |parts| {
+            try testing.expectEqual(@as(usize, 1), parts.len);
+            try testing.expectEqualStrings("foo bar.txt", parts[0].text);
+            try testing.expectEqual(QuoteKind.double, parts[0].quotes);
+        },
+        else => return error.TestExpectedEqual,
+    }
+}
+
+test "Redirections: single-quoted path preserves literal" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    const prog = try parseTestNoSource(&arena, "echo test > '$var.txt'");
+
+    const cmd = prog.statements[0].kind.command.chains[0].pipeline.commands[0];
+    try testing.expectEqual(@as(usize, 1), cmd.redirects.len);
+
+    const r = cmd.redirects[0];
+    switch (r.kind) {
+        .write_truncate => |parts| {
+            try testing.expectEqual(@as(usize, 1), parts.len);
+            try testing.expectEqualStrings("$var.txt", parts[0].text);
+            try testing.expectEqual(QuoteKind.single, parts[0].quotes);
+        },
+        else => return error.TestExpectedEqual,
+    }
+}
+
+test "Redirections: variable in path" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    const prog = try parseTestNoSource(&arena, "echo test > $outfile");
+
+    const cmd = prog.statements[0].kind.command.chains[0].pipeline.commands[0];
+    try testing.expectEqual(@as(usize, 1), cmd.redirects.len);
+
+    const r = cmd.redirects[0];
+    switch (r.kind) {
+        .write_truncate => |parts| {
+            try testing.expectEqual(@as(usize, 1), parts.len);
+            try testing.expectEqualStrings("$outfile", parts[0].text);
+            try testing.expectEqual(QuoteKind.none, parts[0].quotes);
         },
         else => return error.TestExpectedEqual,
     }
