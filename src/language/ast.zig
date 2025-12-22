@@ -89,18 +89,22 @@ pub const Capture = struct {
 // =============================================================================
 
 /// The type of I/O redirection.
+/// Can represent both unexpanded (AST) and expanded forms.
+/// In AST: path is the literal string from source
+/// In expanded: path is the expanded string
 pub const RedirectKind = union(enum) {
     /// Redirect input from a file to fd (defaults to stdin)
-    read: []const WordPart,
+    read: []const u8,
     /// Redirect output to a file (truncate) from fd (defaults to stdout)
-    write_truncate: []const WordPart,
+    write_truncate: []const u8,
     /// Redirect output to a file (append) from fd (defaults to stdout)
-    write_append: []const WordPart,
+    write_append: []const u8,
     /// Duplicate one fd to another (e.g., 2>&1)
     dup: u8,
 };
 
 /// A single I/O redirection (e.g., `< input.txt`, `> output.txt`, `2>&1`)
+/// Can represent both unexpanded (AST) and expanded forms.
 pub const Redirect = struct {
     /// File descriptor being redirected (0=stdin, 1=stdout, 2=stderr)
     from_fd: u8,

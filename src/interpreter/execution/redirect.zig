@@ -4,11 +4,10 @@
 //! by opening files and using dup2() to redirect standard file descriptors.
 
 const std = @import("std");
-const expansion_types = @import("../expansion/expanded.zig");
+const ast = @import("../../language/ast.zig");
 const io = @import("../../terminal/io.zig");
 
-const ExpandedRedir = expansion_types.ExpandedRedir;
-const RedirKind = expansion_types.RedirKind;
+const Redirect = ast.Redirect;
 
 /// Open a file and dup2 it to target fd
 fn openAndDup(path: []const u8, flags: std.posix.O, mode: std.posix.mode_t, target_fd: u8) !void {
@@ -22,24 +21,20 @@ fn openAndDup(path: []const u8, flags: std.posix.O, mode: std.posix.mode_t, targ
 
 /// Apply file redirections for a command (called in child process)
 /// Redirections are applied in order, which matters for cases like `>out 2>&1`
-pub fn apply(redirs: []const ExpandedRedir) !void {
+pub fn apply(redirs: []const Redirect) !void {
     for (redirs) |redir| {
         switch (redir.kind) {
-            .read => {
-                const path = redir.path orelse continue;
-                try openAndDup(path, .{ .ACCMODE = .RDONLY }, 0, redir.fd);
+            .read => |path| {
+                try openAndDup(path, .{ .ACCMODE = .RDONLY }, 0, redir.from_fd);
             },
-            .write_truncate => {
-                const path = redir.path orelse continue;
-                try openAndDup(path, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, 0o644, redir.fd);
+            .write_truncate => |path| {
+                try openAndDup(path, .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, 0o644, redir.from_fd);
             },
-            .write_append => {
-                const path = redir.path orelse continue;
-                try openAndDup(path, .{ .ACCMODE = .WRONLY, .CREAT = true, .APPEND = true }, 0o644, redir.fd);
+            .write_append => |path| {
+                try openAndDup(path, .{ .ACCMODE = .WRONLY, .CREAT = true, .APPEND = true }, 0o644, redir.from_fd);
             },
-            .dup => {
-                const to_fd = redir.to orelse continue;
-                try std.posix.dup2(to_fd, redir.fd);
+            .dup => |to_fd| {
+                try std.posix.dup2(to_fd, redir.from_fd);
             },
         }
     }

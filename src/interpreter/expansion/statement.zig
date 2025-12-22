@@ -28,7 +28,6 @@ const WordPart = token_types.WordPart;
 const CaptureMode = ast.CaptureMode;
 
 const ExpandedCmd = expansion_types.ExpandedCmd;
-const ExpandedRedir = expansion_types.ExpandedRedir;
 const Capture = expansion_types.Capture;
 
 pub const ExpandError = error{
@@ -62,29 +61,13 @@ fn expandCommand(allocator: std.mem.Allocator, ctx: *expand.ExpandContext, cmd: 
     const words_with_alias = try applyAliasExpansion(allocator, ctx, cmd.words);
 
     for (cmd.assignments) |assign| {
-        // Parse the assignment value as a word and expand it
-        var lexer = lexer_mod.Lexer.init(allocator, assign.value);
-        const tokens = lexer.tokenize() catch {
-            // If tokenization fails, use the literal value
-            try env_list.append(allocator, .{ .key = assign.key, .value = assign.value });
-            continue;
-        };
-
-        var expanded_value: []const u8 = "";
-        if (tokens.len > 0 and tokens[0].kind == .word) {
-            const expanded_values = try expand.expandWord(ctx, tokens[0].kind.word);
-            expanded_value = try joinValues(allocator, expanded_values);
-        } else {
-            // No word token, use literal value
-            expanded_value = assign.value;
-        }
-
+        const expanded_value = try expandAssignmentValue(allocator, ctx, assign.value);
         try env_list.append(allocator, .{ .key = assign.key, .value = expanded_value });
     }
 
     const expanded_argv = try expand.expandWords(ctx, words_with_alias);
 
-    var redir_expanded: std.ArrayListUnmanaged(ExpandedRedir) = .empty;
+    var redir_expanded: std.ArrayListUnmanaged(ast.Redirect) = .empty;
     for (cmd.redirects) |redir| {
         const redir_result = try expandRedirect(allocator, ctx, redir);
         try redir_expanded.append(allocator, redir_result);
@@ -136,25 +119,54 @@ fn applyAliasExpansion(allocator: std.mem.Allocator, ctx: *expand.ExpandContext,
 // Redirect and Helper Functions
 // =============================================================================
 
-fn expandRedirect(_: std.mem.Allocator, ctx: *expand.ExpandContext, redirect: Redirect) (ExpandError || expand.ExpandError || std.mem.Allocator.Error)!ExpandedRedir {
-    return switch (redirect.kind) {
-        .dup => |to_fd| ExpandedRedir.initDup(redirect.from_fd, to_fd),
-        .read => |parts| blk: {
-            const expanded = try expand.expandWord(ctx, parts);
-            const target_str = if (expanded.len > 0) expanded[0] else "";
-            break :blk ExpandedRedir.initRead(redirect.from_fd, target_str);
-        },
-        .write_truncate => |parts| blk: {
-            const expanded = try expand.expandWord(ctx, parts);
-            const target_str = if (expanded.len > 0) expanded[0] else "";
-            break :blk ExpandedRedir.initWriteTruncate(redirect.from_fd, target_str);
-        },
-        .write_append => |parts| blk: {
-            const expanded = try expand.expandWord(ctx, parts);
-            const target_str = if (expanded.len > 0) expanded[0] else "";
-            break :blk ExpandedRedir.initWriteAppend(redirect.from_fd, target_str);
-        },
+fn expandRedirect(allocator: std.mem.Allocator, ctx: *expand.ExpandContext, redirect: Redirect) (ExpandError || expand.ExpandError || std.mem.Allocator.Error)!ast.Redirect {
+    const expanded_kind: ast.RedirectKind = switch (redirect.kind) {
+        .dup => |to_fd| .{ .dup = to_fd },
+        .read => |path| .{ .read = try expandPath(allocator, ctx, path) },
+        .write_truncate => |path| .{ .write_truncate = try expandPath(allocator, ctx, path) },
+        .write_append => |path| .{ .write_append = try expandPath(allocator, ctx, path) },
     };
+
+    return ast.Redirect{
+        .from_fd = redirect.from_fd,
+        .kind = expanded_kind,
+    };
+}
+
+fn expandPath(allocator: std.mem.Allocator, ctx: *expand.ExpandContext, path: []const u8) (ExpandError || expand.ExpandError || std.mem.Allocator.Error)![]const u8 {
+    // Tokenize the path string and expand it
+    var lexer = lexer_mod.Lexer.init(allocator, path);
+    const tokens = lexer.tokenize() catch {
+        // If tokenization fails, use the literal value
+        return path;
+    };
+
+    if (tokens.len > 0 and tokens[0].kind == .word) {
+        const expanded_values = try expand.expandWord(ctx, tokens[0].kind.word);
+        if (expanded_values.len > 0) {
+            return expanded_values[0];
+        }
+    }
+
+    // Fall back to literal path
+    return path;
+}
+
+fn expandAssignmentValue(allocator: std.mem.Allocator, ctx: *expand.ExpandContext, value: []const u8) (ExpandError || expand.ExpandError || std.mem.Allocator.Error)![]const u8 {
+    // Tokenize the assignment value and expand it
+    var lexer = lexer_mod.Lexer.init(allocator, value);
+    const tokens = lexer.tokenize() catch {
+        // If tokenization fails, use the literal value
+        return value;
+    };
+
+    if (tokens.len > 0 and tokens[0].kind == .word) {
+        const expanded_values = try expand.expandWord(ctx, tokens[0].kind.word);
+        return try joinValues(allocator, expanded_values);
+    }
+
+    // Fall back to literal value
+    return value;
 }
 
 fn joinValues(allocator: std.mem.Allocator, values: []const []const u8) std.mem.Allocator.Error![]const u8 {

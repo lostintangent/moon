@@ -5,9 +5,9 @@
 //! store their bodies as strings and are re-parsed at runtime.
 //!
 //! TRANSFORMED (new types defined below):
-//!   - ExpandedRedir - parses ">" into structured {fd, kind, path}
 //!   - ExpandedCmd - expands $vars, globs, ~, $(cmd) into flat argv
 //!   - Uses ast.Assignment for expanded environment variables
+//!   - Uses ast.Redirect for expanded redirections
 
 pub const ast = @import("../../language/ast.zig");
 
@@ -22,44 +22,11 @@ pub const Capture = ast.Capture;
 // Transformed types (planner does actual work here)
 // =============================================================================
 
-/// Redirection - parsed from string operator to structured form
-/// AST has: RedirAst { op: ">", target: []WordPart }
-/// Expanded has: ExpandedRedir { fd: 1, kind: .write_truncate, path: "file.txt" }
-pub const RedirKind = enum {
-    read,
-    write_truncate,
-    write_append,
-    dup,
-};
-
-pub const ExpandedRedir = struct {
-    fd: u8,
-    kind: RedirKind,
-    path: ?[]const u8 = null,
-    to: ?u8 = null,
-
-    pub fn initRead(fd: u8, path: []const u8) ExpandedRedir {
-        return .{ .fd = fd, .kind = .read, .path = path, .to = null };
-    }
-
-    pub fn initWriteTruncate(fd: u8, path: []const u8) ExpandedRedir {
-        return .{ .fd = fd, .kind = .write_truncate, .path = path, .to = null };
-    }
-
-    pub fn initWriteAppend(fd: u8, path: []const u8) ExpandedRedir {
-        return .{ .fd = fd, .kind = .write_append, .path = path, .to = null };
-    }
-
-    pub fn initDup(fd: u8, to: u8) ExpandedRedir {
-        return .{ .fd = fd, .kind = .dup, .path = null, .to = to };
-    }
-};
-
 /// Command - fully expanded and ready to exec
 /// AST has: Command { words: [][]WordPart, ... } with $vars, globs, quotes
 /// Expanded has: ExpandedCmd { argv: ["echo", "hello", "a.txt", "b.txt"], ... } flat strings
 pub const ExpandedCmd = struct {
     argv: []const []const u8,
     env: []const ast.Assignment,
-    redirects: []const ExpandedRedir,
+    redirects: []const ast.Redirect,
 };

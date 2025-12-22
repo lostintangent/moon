@@ -229,14 +229,37 @@ pub const Parser = struct {
         const word_tok = self.advance().?;
         const parts = word_tok.kind.word;
 
+        // Join word parts into a single string
+        const target = try joinWordParts(self.allocator, parts);
+
         const kind: RedirectKind = if (op_text[0] == '<')
-            .{ .read = parts }
+            .{ .read = target }
         else if (std.mem.endsWith(u8, op_text, ">>"))
-            .{ .write_append = parts }
+            .{ .write_append = target }
         else
-            .{ .write_truncate = parts };
+            .{ .write_truncate = target };
 
         return Redirect{ .from_fd = fd, .kind = kind };
+    }
+
+    /// Join word parts into a single string (for redirects and assignments)
+    fn joinWordParts(allocator: std.mem.Allocator, parts: []const WordPart) std.mem.Allocator.Error![]const u8 {
+        if (parts.len == 0) return "";
+        if (parts.len == 1) return parts[0].text;
+
+        var total_len: usize = 0;
+        for (parts) |part| {
+            total_len += part.text.len;
+        }
+
+        const result = try allocator.alloc(u8, total_len);
+        var pos: usize = 0;
+        for (parts) |part| {
+            @memcpy(result[pos..][0..part.text.len], part.text);
+            pos += part.text.len;
+        }
+
+        return result;
     }
 
     // =========================================================================
@@ -797,9 +820,8 @@ test "Redirections: input and output" {
     const r1 = cmd.redirects[0];
     try testing.expectEqual(@as(u8, 0), r1.from_fd);
     switch (r1.kind) {
-        .read => |parts| {
-            try testing.expectEqual(@as(usize, 1), parts.len);
-            try testing.expectEqualStrings("in.txt", parts[0].text);
+        .read => |path| {
+            try testing.expectEqualStrings("in.txt", path);
         },
         else => return error.TestExpectedEqual,
     }
@@ -808,9 +830,8 @@ test "Redirections: input and output" {
     const r2 = cmd.redirects[1];
     try testing.expectEqual(@as(u8, 1), r2.from_fd);
     switch (r2.kind) {
-        .write_truncate => |parts| {
-            try testing.expectEqual(@as(usize, 1), parts.len);
-            try testing.expectEqualStrings("out.txt", parts[0].text);
+        .write_truncate => |path| {
+            try testing.expectEqualStrings("out.txt", path);
         },
         else => return error.TestExpectedEqual,
     }
