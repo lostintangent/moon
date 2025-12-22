@@ -1,6 +1,6 @@
 const std = @import("std");
 
-const version = std.mem.trim(u8, @embedFile("VERSION"), "\n\r ");
+const version = std.mem.trim(u8, @embedFile("scripts/VERSION"), "\n\r ");
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});

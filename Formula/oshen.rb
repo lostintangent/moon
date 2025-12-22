@@ -1,7 +1,7 @@
 class Oshen < Formula
   desc "A terminal shell that's just tryin' to be fun."
   homepage "https://github.com/lostintangent/oshen"
-  version File.read(File.expand_path("../VERSION", __dir__)).strip
+  version File.read(File.expand_path("../scripts/VERSION", __dir__)).strip
   license "MIT"
 
   on_macos do
