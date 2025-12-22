@@ -597,6 +597,17 @@ pub const Parser = struct {
             } else null;
             return Statement{ .kind = .{ .@"return" = status_parts } };
         }
+        if (self.isOp("defer")) {
+            _ = self.advance(); // consume 'defer'
+            // Capture the rest of the line as the deferred command (until separator)
+            const start = self.pos;
+            while (self.pos < self.tokens.len and !self.isSeperator()) {
+                _ = self.advance();
+            }
+            const cmd_source = std.mem.trim(u8, self.extractSourceRange(start, self.pos), " \t\n");
+            // Note: do NOT skip separators here - let the main loop handle them
+            return Statement{ .kind = .{ .@"defer" = cmd_source } };
+        }
 
         // Command statement
         const chains = try self.parseLogical() orelse return null;
@@ -1101,4 +1112,28 @@ test "Return: with variable" {
     try testing.expectEqual(@as(usize, 1), prog.statements.len);
     try testing.expect(prog.statements[0].kind == .@"return");
     try testing.expect(prog.statements[0].kind.@"return" != null);
+}
+
+test "Defer: simple command" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    const prog = try parseTest(&arena, "defer rm -rf $tmpdir");
+
+    try testing.expectEqual(@as(usize, 1), prog.statements.len);
+    try testing.expect(prog.statements[0].kind == .@"defer");
+    try testing.expectEqualStrings("rm -rf $tmpdir", prog.statements[0].kind.@"defer");
+}
+
+test "Defer: in function" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    const input = "fun cleanup\n  defer echo done\n  echo working\nend";
+    const prog = try parseTest(&arena, input);
+
+    try testing.expectEqual(@as(usize, 1), prog.statements.len);
+    const fun_def = prog.statements[0].kind.function;
+    try testing.expectEqualStrings("cleanup", fun_def.name);
+    try testing.expect(std.mem.indexOf(u8, fun_def.body, "defer echo done") != null);
 }

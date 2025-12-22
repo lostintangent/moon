@@ -96,6 +96,7 @@ pub const ExpandedStmtKind = union(enum) {
     @"break": void,
     @"continue": void,
     @"return": ?[]const u8, // Expanded string value (parsed to u8 at execution)
+    @"defer": []const u8, // Command source to execute on function exit
 };
 
 pub const ExpandedStmt = struct {

@@ -329,55 +329,65 @@ test_exit_code "type external" "type ls" "0"
 # ============================================================================
 print_header "File Tests (8 tests)"
 
-# Setup test files
-mkdir -p /tmp/oshen_dogfood_test
-touch /tmp/oshen_dogfood_test/exists.txt
-echo "content" > /tmp/oshen_dogfood_test/nonempty.txt
-mkdir -p /tmp/oshen_dogfood_test/testdir
+# Wrap file tests in a function with defer for automatic cleanup
+fun run_file_tests
+    var testdir /tmp/oshen_dogfood_test
+    mkdir -p $testdir
+    defer rm -rf $testdir
 
-test_exit_code "Test -e exists" "test -e /tmp/oshen_dogfood_test/exists.txt" "0"
-test_exit_code "Test -e not exists" "test -e /tmp/oshen_dogfood_test/nonexistent" "1"
-test_exit_code "Test -f regular file" "test -f /tmp/oshen_dogfood_test/exists.txt" "0"
-test_exit_code "Test -f directory" "test -f /tmp/oshen_dogfood_test/testdir" "1"
-test_exit_code "Test -d directory" "test -d /tmp/oshen_dogfood_test/testdir" "0"
-test_exit_code "Test -d file" "test -d /tmp/oshen_dogfood_test/exists.txt" "1"
-test_exit_code "Test -s non-empty" "test -s /tmp/oshen_dogfood_test/nonempty.txt" "0"
-test_exit_code "Test -s empty" "test -s /tmp/oshen_dogfood_test/exists.txt" "1"
+    touch $testdir/exists.txt
+    echo "content" > $testdir/nonempty.txt
+    mkdir -p $testdir/testdir
 
-# Cleanup
-rm -rf /tmp/oshen_dogfood_test
+    test_exit_code "Test -e exists" "test -e $testdir/exists.txt" "0"
+    test_exit_code "Test -e not exists" "test -e $testdir/nonexistent" "1"
+    test_exit_code "Test -f regular file" "test -f $testdir/exists.txt" "0"
+    test_exit_code "Test -f directory" "test -f $testdir/testdir" "1"
+    test_exit_code "Test -d directory" "test -d $testdir/testdir" "0"
+    test_exit_code "Test -d file" "test -d $testdir/exists.txt" "1"
+    test_exit_code "Test -s non-empty" "test -s $testdir/nonempty.txt" "0"
+    test_exit_code "Test -s empty" "test -s $testdir/exists.txt" "1"
+end
+run_file_tests
 
 # ============================================================================
 # Source Builtin
 # ============================================================================
 print_header "Source Builtin (3 tests)"
 
-# Create a test source file
-echo "var SOURCED_VAR sourced_value" > /tmp/oshen_source_test.wave
-echo "var SOURCED_A 1" > /tmp/oshen_source_test2.wave
-echo "var SOURCED_B 2" >> /tmp/oshen_source_test2.wave
+fun run_source_tests
+    var testfile1 /tmp/oshen_source_test.wave
+    var testfile2 /tmp/oshen_source_test2.wave
+    defer rm -f $testfile1 $testfile2
 
-test_case "Source sets variable" "source /tmp/oshen_source_test.wave; echo \$SOURCED_VAR" "sourced_value"
-test_case "Source multiple vars" "source /tmp/oshen_source_test2.wave; echo \$SOURCED_A \$SOURCED_B" "1 2"
-test_exit_code "Source nonexistent fails" "source /tmp/nonexistent_file_12345.wave" "1"
+    echo "var SOURCED_VAR sourced_value" > $testfile1
+    echo "var SOURCED_A 1" > $testfile2
+    echo "var SOURCED_B 2" >> $testfile2
 
-rm -f /tmp/oshen_source_test.wave /tmp/oshen_source_test2.wave
+    test_case "Source sets variable" "source $testfile1; echo \$SOURCED_VAR" "sourced_value"
+    test_case "Source multiple vars" "source $testfile2; echo \$SOURCED_A \$SOURCED_B" "1 2"
+    test_exit_code "Source nonexistent fails" "source /tmp/nonexistent_file_12345.wave" "1"
+end
+run_source_tests
 
 # ============================================================================
 # Redirections
 # ============================================================================
 print_header "Redirections (6 tests)"
 
-mkdir -p /tmp/oshen_redir_test
+fun run_redir_tests
+    var testdir /tmp/oshen_redir_test
+    mkdir -p $testdir
+    defer rm -rf $testdir
 
-test_case "Output redirect >" "echo hello > /tmp/oshen_redir_test/out.txt; cat /tmp/oshen_redir_test/out.txt" "hello"
-test_exit_code "Append redirect >>" "echo a > /tmp/oshen_redir_test/append.txt; echo b >> /tmp/oshen_redir_test/append.txt" "0"
-test_case "Input redirect <" "echo content > /tmp/oshen_redir_test/in.txt; cat < /tmp/oshen_redir_test/in.txt" "content"
-test_case "Redirect overwrite" "echo first > /tmp/oshen_redir_test/over.txt; echo second > /tmp/oshen_redir_test/over.txt; cat /tmp/oshen_redir_test/over.txt" "second"
-test_case "Redirect to /dev/null" "echo hidden > /dev/null; echo shown" "shown"
-test_case "Redirect in pipeline" "echo data | cat > /tmp/oshen_redir_test/pipe.txt; cat /tmp/oshen_redir_test/pipe.txt" "data"
-
-rm -rf /tmp/oshen_redir_test
+    test_case "Output redirect >" "echo hello > $testdir/out.txt; cat $testdir/out.txt" "hello"
+    test_exit_code "Append redirect >>" "echo a > $testdir/append.txt; echo b >> $testdir/append.txt" "0"
+    test_case "Input redirect <" "echo content > $testdir/in.txt; cat < $testdir/in.txt" "content"
+    test_case "Redirect overwrite" "echo first > $testdir/over.txt; echo second > $testdir/over.txt; cat $testdir/over.txt" "second"
+    test_case "Redirect to /dev/null" "echo hidden > /dev/null; echo shown" "shown"
+    test_case "Redirect in pipeline" "echo data | cat > $testdir/pipe.txt; cat $testdir/pipe.txt" "data"
+end
+run_redir_tests
 
 # ============================================================================
 # Lines Capture
@@ -394,20 +404,22 @@ test_case "Lines capture all" "printf 'one\ntwo\n' =>@ words; echo \$words" "one
 # ============================================================================
 print_header "Glob Patterns (5 tests)"
 
-# Use a unique directory with timestamp-based name to avoid conflicts
-rm -rf /tmp/oshen_glob_test_dogfood
-mkdir -p /tmp/oshen_glob_test_dogfood
-touch /tmp/oshen_glob_test_dogfood/a.txt /tmp/oshen_glob_test_dogfood/b.txt /tmp/oshen_glob_test_dogfood/c.txt
-touch /tmp/oshen_glob_test_dogfood/test.md
+fun run_glob_tests
+    var testdir /tmp/oshen_glob_test_dogfood
+    mkdir -p $testdir
+    defer rm -rf $testdir
 
-test_case "Glob star txt" "cd /tmp/oshen_glob_test_dogfood; echo *.txt" "a.txt b.txt c.txt"
-test_case "Glob star md" "cd /tmp/oshen_glob_test_dogfood; echo *.md" "test.md"
-test_case "Glob in for loop" "cd /tmp/oshen_glob_test_dogfood; for f in *.md; echo \$f; end" "test.md"
-test_case "Glob no matches literal" "cd /tmp/oshen_glob_test_dogfood; echo *.xyz" "*.xyz"
-# Note: use exit code tests to avoid glob expansion in expected value
-test_exit_code "Glob suppressed in single quotes" "cd /tmp/oshen_glob_test_dogfood; test \"\$(echo '*.txt')\" = '*.txt'" "0"
+    touch $testdir/a.txt $testdir/b.txt $testdir/c.txt
+    touch $testdir/test.md
 
-rm -rf /tmp/oshen_glob_test_dogfood
+    test_case "Glob star txt" "cd $testdir; echo *.txt" "a.txt b.txt c.txt"
+    test_case "Glob star md" "cd $testdir; echo *.md" "test.md"
+    test_case "Glob in for loop" "cd $testdir; for f in *.md; echo \$f; end" "test.md"
+    test_case "Glob no matches literal" "cd $testdir; echo *.xyz" "*.xyz"
+    # Note: use exit code tests to avoid glob expansion in expected value
+    test_exit_code "Glob suppressed in single quotes" "cd $testdir; test \"\$(echo '*.txt')\" = '*.txt'" "0"
+end
+run_glob_tests
 
 # ============================================================================
 # Comments
@@ -470,6 +482,27 @@ test_exit_code "Conditional in loop" "for i in 1 2 3 4 5; if test \$i -gt 3; ech
 test_case "Arithmetic in loop" "var sum 0; for i in 1 2 3; var sum \$(expr \$sum + \$i); end; echo \$sum" "6"
 test_case "Pipeline with multiple stages" "printf '1\n2\n3\n4\n5\n' | head -n 3 | tail -n 1" "3"
 test_case "Capture in conditional" "echo 5 => num; if test \$num -eq 5; echo match; end" "match"
+
+# ============================================================================
+# Defer Statements
+# ============================================================================
+print_header "Defer Statements (6 tests)"
+
+test_case "Simple defer" "fun f; defer echo cleanup; echo work; end; f" "work
+cleanup"
+test_case "Defer LIFO order" "fun f; defer echo first; defer echo second; defer echo third; echo work; end; f" "work
+third
+second
+first"
+test_case "Defer with early return" "fun f; defer echo cleanup; echo before; return; echo after; end; f" "before
+cleanup"
+test_case "Defer with variable" "fun f; var msg done; defer echo \$msg; echo working; end; f" "working
+done"
+test_case "Nested function defer" "fun inner; defer echo inner_cleanup; echo inner_work; end; fun outer; defer echo outer_cleanup; inner; echo outer_work; end; outer" "inner_work
+inner_cleanup
+outer_work
+outer_cleanup"
+test_exit_code "Defer preserves exit status" "fun f; defer echo cleanup; return 42; end; f" "42"
 
 # ============================================================================
 # Print Summary

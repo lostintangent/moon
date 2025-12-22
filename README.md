@@ -78,6 +78,7 @@ oshen script.wave
 - [While Loops](#while-loops)
 - [Conditional Chaining](#conditional-chaining)
 - [Functions](#functions)
+- [Defer](#defer)
 
 ### Commands & I/O
 
@@ -627,6 +628,63 @@ end
 # Check the exit status
 check_file config.txt
 echo $?                 # Prints the return code
+```
+
+---
+
+## Defer
+
+Schedule cleanup commands that run automatically when a function exits. Inspired by Go and Zig, `defer` ensures resources are released regardless of how the function exits—normal completion, early return, or error.
+
+```sh
+fun with_tempdir
+    var tmpdir $(mktemp -d)
+    defer rm -rf $tmpdir           # Runs when function exits
+
+    echo "Working in $tmpdir"
+    cp *.txt $tmpdir
+    tar -czf archive.tar.gz $tmpdir
+end
+
+with_tempdir                       # Temp dir is automatically cleaned up
+```
+
+### LIFO Execution Order
+
+Multiple defers execute in reverse order (last in, first out):
+
+```sh
+fun setup_and_teardown
+    defer echo "3. final cleanup"
+    defer echo "2. close connection"
+    defer echo "1. release lock"
+    echo "doing work..."
+end
+
+setup_and_teardown
+# Output:
+# doing work...
+# 1. release lock
+# 2. close connection
+# 3. final cleanup
+```
+
+### Works with Early Returns
+
+Deferred commands run even when returning early:
+
+```sh
+fun safe_process
+    var tmpfile $(mktemp)
+    defer rm $tmpfile
+
+    if test ! -f input.txt
+        return 1                   # Cleanup still happens
+    end
+
+    cat input.txt > $tmpfile
+    wc -l $tmpfile
+end
 ```
 
 ---

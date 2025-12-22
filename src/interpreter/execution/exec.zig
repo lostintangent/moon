@@ -86,6 +86,13 @@ pub fn executeStatement(allocator: std.mem.Allocator, state: *State, stmt: Expan
             // If no argument, status is already the last command's exit status
             return state.status;
         },
+        .@"defer" => |cmd_source| {
+            // Push the command onto the defer stack (will be executed LIFO on function exit)
+            state.pushDefer(cmd_source) catch {
+                return 1;
+            };
+            return 0;
+        },
     };
 }
 
@@ -440,6 +447,17 @@ fn restoreArgv(state: *State, old_argv: ?[]const []const u8) void {
     }
 }
 
+/// Execute deferred commands from a given index in LIFO order.
+/// This allows nested functions to only run their own defers.
+fn runDeferredCommandsFromIndex(allocator: std.mem.Allocator, state: *State, from_index: usize) void {
+    // Pop and execute in reverse order (LIFO), but only commands added after from_index
+    while (state.deferred.items.len > from_index) {
+        const cmd = state.popDeferred().?;
+        defer state.allocator.free(cmd);
+        _ = interpreter_mod.execute(allocator, state, cmd) catch {};
+    }
+}
+
 fn runFunctionWithArgs(allocator: std.mem.Allocator, state: *State, cmd: ExpandedCmd) ?u8 {
     if (cmd.argv.len == 0) return null;
 
@@ -448,6 +466,14 @@ fn runFunctionWithArgs(allocator: std.mem.Allocator, state: *State, cmd: Expande
 
     // Save current $argv (as list)
     const old_argv = state.getVarList("argv");
+
+    // Remember how many deferred commands exist before this function
+    // (so we only run defers added by this function)
+    const defer_count_before = state.deferred.items.len;
+
+    // Use Zig's defer for guaranteed cleanup on all exit paths
+    defer restoreArgv(state, old_argv);
+    defer runDeferredCommandsFromIndex(allocator, state, defer_count_before);
 
     // Set $argv to function arguments (skip function name)
     if (cmd.argv.len > 1) {
@@ -460,19 +486,16 @@ fn runFunctionWithArgs(allocator: std.mem.Allocator, state: *State, cmd: Expande
     // Execute the function body, catching errors and converting to status
     const status = interpreter_mod.execute(allocator, state, body) catch |err| {
         io.printError("function {s}: {}\n", .{ name, err });
-        restoreArgv(state, old_argv);
         state.fn_return = false;
         return 1;
     };
 
     // If fn_return is set, use state.status (set by return statement), otherwise use last command status
-    const return_status = if (state.fn_return) blk: {
+    if (state.fn_return) {
         state.fn_return = false;
-        break :blk state.status;
-    } else status;
-
-    restoreArgv(state, old_argv);
-    return return_status;
+        return state.status;
+    }
+    return status;
 }
 
 /// Try to execute a user-defined function.

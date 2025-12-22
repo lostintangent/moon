@@ -66,6 +66,9 @@ pub const State = struct {
     /// Flag to signal function should return
     fn_return: bool = false,
 
+    /// Stack of deferred commands (LIFO execution order)
+    deferred: std.ArrayListUnmanaged([]const u8),
+
     // =========================================================================
     // Memory Management Helpers
     // =========================================================================
@@ -91,6 +94,7 @@ pub const State = struct {
             .functions = std.StringHashMap([]const u8).init(allocator),
             .aliases = std.StringHashMap([]const u8).init(allocator),
             .jobs = JobTable.init(allocator),
+            .deferred = .empty,
         };
 
         // Initialize HOME from environment
@@ -147,6 +151,12 @@ pub const State = struct {
 
         // Clean up jobs
         self.jobs.deinit();
+
+        // Free deferred commands
+        for (self.deferred.items) |cmd| {
+            self.allocator.free(cmd);
+        }
+        self.deferred.deinit(self.allocator);
     }
 
     /// Get a variable value (returns first element for string context)
@@ -282,6 +292,18 @@ pub const State = struct {
 
         // Invalidate cached cwd since we changed directories
         self.cwd = null;
+    }
+
+    /// Push a deferred command onto the stack (executed LIFO on function exit)
+    pub fn pushDefer(self: *State, cmd: []const u8) !void {
+        const duped = try self.allocator.dupe(u8, cmd);
+        try self.deferred.append(self.allocator, duped);
+    }
+
+    /// Pop and return the last deferred command, or null if empty
+    pub fn popDeferred(self: *State) ?[]const u8 {
+        if (self.deferred.items.len == 0) return null;
+        return self.deferred.pop();
     }
 };
 

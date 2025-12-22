@@ -113,6 +113,10 @@ pub fn expandStatement(allocator: std.mem.Allocator, ctx: *expand.ExpandContext,
             }
             break :blk ExpandedStmt{ .kind = .{ .@"return" = null } };
         },
+        .@"defer" => |cmd_source| ExpandedStmt{
+            // Pass through the command source unchanged - will be parsed at execution
+            .kind = .{ .@"defer" = cmd_source },
+        },
     };
 }
 

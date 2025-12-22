@@ -186,6 +186,8 @@ pub const StatementKind = union(enum) {
     @"continue": void,
     /// Return from current function with optional status
     @"return": ?[]const WordPart,
+    /// Defer a command to run when the current function exits
+    @"defer": []const u8,
 };
 
 /// A single statement in the program.
