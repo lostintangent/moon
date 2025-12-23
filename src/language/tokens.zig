@@ -36,6 +36,7 @@
 //! Also provides operator/keyword tables for O(1) lookups.
 
 const std = @import("std");
+const ast = @import("ast.zig");
 
 /// Indicates how a word segment was quoted in the source.
 /// Used by the expander to determine which expansions apply:
@@ -68,6 +69,9 @@ pub const WordPart = struct {
     quotes: QuoteKind,
     text: []const u8,
 
+    /// Compares two word parts for semantic equality.
+    /// Note: Compares text content (not pointer identity) and quote kind.
+    /// Two word parts are equal if they have the same quote type and text content.
     pub fn eql(self: WordPart, other: WordPart) bool {
         return self.quotes == other.quotes and std.mem.eql(u8, self.text, other.text);
     }
@@ -158,6 +162,16 @@ pub fn isLogicalOperator(text: []const u8) bool {
     return logical_operators.has(text);
 }
 
+/// Parses a logical operator string and returns its ChainOperator type.
+/// Returns null if the text is not a logical operator.
+pub fn parseLogicalOperator(text: []const u8) ?ast.ChainOperator {
+    if (!logical_operators.has(text)) return null;
+    return if (std.mem.eql(u8, text, "and") or std.mem.eql(u8, text, "&&"))
+        .@"and"
+    else
+        .@"or";
+}
+
 /// Returns true if `c` is a valid identifier character (alphanumeric or underscore).
 pub fn isIdentChar(c: u8) bool {
     return std.ascii.isAlphanumeric(c) or c == '_';
@@ -166,6 +180,17 @@ pub fn isIdentChar(c: u8) bool {
 /// Returns true if `c` is a valid identifier start character (alphabetic or underscore).
 pub fn isIdentStart(c: u8) bool {
     return std.ascii.isAlphabetic(c) or c == '_';
+}
+
+/// Validates that a string is a valid identifier.
+/// Must start with alphabetic or underscore, and contain only alphanumeric or underscores.
+pub fn isValidIdentifier(text: []const u8) bool {
+    if (text.len == 0) return false;
+    if (!isIdentStart(text[0])) return false;
+    for (text[1..]) |c| {
+        if (!isIdentChar(c)) return false;
+    }
+    return true;
 }
 
 /// Returns true if `c` is a word boundary (whitespace or command separator).

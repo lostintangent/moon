@@ -19,19 +19,19 @@ fun test_case
     # Interpret escape sequences in expected value
     echo -n $3 => expected
 
-    set TOTAL $(expr $TOTAL + 1)
+    set TOTAL (math $TOTAL + 1)
     eval "$cmd" => output
 
     if test "$output" = "$expected"
         print -n --green "✓ "
         print "$name"
-        set PASS $(expr $PASS + 1)
+        set PASS (math $PASS + 1)
     else
         print -n --red "✗ "
         print "$name"
         print "  Expected: '$expected'"
         print "  Got:      '$output'"
-        set FAIL $(expr $FAIL + 1)
+        set FAIL (math $FAIL + 1)
     end
 end
 
@@ -40,20 +40,20 @@ fun test_exit_code
     var cmd $2
     var expected_code $3
 
-    set TOTAL $(expr $TOTAL + 1)
+    set TOTAL (math $TOTAL + 1)
     eval "$cmd"
     var exit_code $status
 
     if test $exit_code = $expected_code
         print -n --green "✓ "
         print "$name"
-        set PASS $(expr $PASS + 1)
+        set PASS (math $PASS + 1)
     else
         print -n --red "✗ "
         print "$name"
         print "  Expected exit: $expected_code"
         print "  Got exit:      $exit_code"
-        set FAIL $(expr $FAIL + 1)
+        set FAIL (math $FAIL + 1)
     end
 end
 
@@ -151,7 +151,7 @@ test_case "Multiple substitutions" 'echo $(echo a) $(echo b)' "a b"
 test_case "Nested substitution" 'echo $(echo $(echo nested))' "nested"
 test_case "Substitution with variable" 'var x world; echo $(echo $x)' "world"
 test_case "Empty substitution" 'echo [$(echo)]' "[]"
-test_case "Substitution arithmetic" 'echo $(expr 2 + 2)' "4"
+test_case "Substitution arithmetic" 'echo (math 2 + 2)' "4"
 test_case "Multi-word substitution" 'echo $(echo one two)' "one two"
 
 # Bare paren syntax (fish-style)
@@ -260,7 +260,7 @@ test_case "String capture =>" "echo hello => x; echo \$x" "hello"
 test_case "Capture to new var" "echo world => greeting; echo \$greeting" "world"
 test_case "Capture empty" "echo => x; echo [\$x]" "[]"
 test_case "Capture multi-word" "echo one two three => words; echo \$words" "one two three"
-test_case "Capture command output" "expr 2 + 3 => result; echo \$result" "5"
+test_case "Capture command output" "math 2 + 3 => result; echo \$result" "5"
 test_case "Multiple captures" "echo a => x; echo b => y; echo \$x \$y" "a b"
 
 # ============================================================================
@@ -308,13 +308,13 @@ var prev_worked $?
 if test $prev_worked -eq 0
     print -n --green "✓ "
     print "CD - returns to previous"
-    var PASS $(expr $PASS + 1)
+    var PASS (math $PASS + 1)
 else
     print -n --red "✗ "
     print "CD - returns to previous"
-    var FAIL $(expr $FAIL + 1)
+    var FAIL (math $FAIL + 1)
 end
-var TOTAL $(expr $TOTAL + 1)
+var TOTAL (math $TOTAL + 1)
 
 # ============================================================================
 # Builtins
@@ -500,7 +500,7 @@ print_header "Complex Scenarios (6 tests)"
 test_case "Function with multiple returns" "fun check; if test \$1 = a; return 1; else if test \$1 = b; return 2; else; return 3; end; end; check b; echo \$?" "2"
 test_exit_code "Nested loops with break" "for x in 1 2; for y in a b c; echo \$x\$y; if test \$y = b; break; end; end; end" "0"
 test_exit_code "Conditional in loop" "for i in 1 2 3 4 5; if test \$i -gt 3; echo \$i; end; end" "0"
-test_case "Arithmetic in loop" "var sum 0; for i in 1 2 3; var sum \$(expr \$sum + \$i); end; echo \$sum" "6"
+test_case "Arithmetic in loop" "var sum 0; for i in 1 2 3; var sum (math \$sum + \$i); end; echo \$sum" "6"
 test_case "Pipeline with multiple stages" "printf '1\n2\n3\n4\n5\n' | head -n 3 | tail -n 1" "3"
 test_case "Capture in conditional" "echo 5 => num; if test \$num -eq 5; echo match; end" "match"
 
@@ -599,7 +599,7 @@ print --red "Failed:       $FAIL"
 print ""
 
 # Calculate pass rate (using * without escape for oshen)
-var PASS_RATE $(expr $PASS '*' 100 / $TOTAL)
+var PASS_RATE (math $PASS '*' 100 / $TOTAL)
 print "Pass Rate: $PASS_RATE%"
 print ""
 

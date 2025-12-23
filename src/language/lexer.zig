@@ -43,6 +43,11 @@ pub const Lexer = struct {
     // Input navigation helpers
     // =========================================================================
 
+    /// Checks if the position plus offset is within bounds of the input.
+    inline fn isInBounds(self: *const Lexer, offset: usize) bool {
+        return self.pos + offset < self.input.len;
+    }
+
     /// Returns the character at the current position, or null if at end of input.
     inline fn peek(self: *const Lexer) ?u8 {
         return if (self.pos < self.input.len) self.input[self.pos] else null;
@@ -50,13 +55,15 @@ pub const Lexer = struct {
 
     /// Returns the character at `offset` positions ahead, or null if out of bounds.
     inline fn peekAt(self: *const Lexer, offset: usize) ?u8 {
-        const idx = self.pos + offset;
-        return if (idx < self.input.len) self.input[idx] else null;
+        return if (self.isInBounds(offset)) self.input[self.pos + offset] else null;
     }
 
     /// Returns a slice of `len` characters starting at current position, or null if not enough input.
     inline fn peekSlice(self: *const Lexer, len: usize) ?[]const u8 {
-        return if (self.pos + len <= self.input.len) self.input[self.pos .. self.pos + len] else null;
+        return if (len == 0 or !self.isInBounds(len - 1))
+            null
+        else
+            self.input[self.pos .. self.pos + len];
     }
 
     /// Advances position by one character.

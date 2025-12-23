@@ -39,7 +39,6 @@ const Capture = ast.Capture;
 const CaptureMode = ast.CaptureMode;
 
 pub const ParseError = error{
-    UnexpectedToken,
     UnexpectedEOF,
     InvalidCapture,
     CaptureWithBackground,
@@ -89,8 +88,8 @@ pub const Parser = struct {
         return self.tokens[self.pos];
     }
 
-    fn skipSeperators(self: *Parser) void {
-        while (self.isSeperator()) {
+    fn skipSeparators(self: *Parser) void {
+        while (self.isSeparator()) {
             _ = self.advance();
         }
     }
@@ -120,7 +119,7 @@ pub const Parser = struct {
     }
 
     /// Returns true if current token is a separator (newline or semicolon).
-    fn isSeperator(self: *const Parser) bool {
+    fn isSeparator(self: *const Parser) bool {
         const tok = self.peek() orelse return false;
         return tok.kind == .separator;
     }
@@ -162,12 +161,7 @@ pub const Parser = struct {
         if (eq_pos == 0) return null; // Empty key
 
         const key = text[0..eq_pos];
-
-        // Validate identifier: must start with alpha/underscore, continue with alphanumeric/underscore
-        if (!token_types.isIdentStart(key[0])) return null;
-        for (key[1..]) |c| {
-            if (!token_types.isIdentChar(c)) return null;
-        }
+        if (!token_types.isValidIdentifier(key)) return null;
 
         return .{ .key = key, .value = text[eq_pos + 1 ..] };
     }
@@ -177,18 +171,14 @@ pub const Parser = struct {
     fn tryParseLogicalOp(self: *const Parser) ?ChainOperator {
         const tok = self.peek() orelse return null;
 
-        switch (tok.kind) {
-            .operator => |t| {
-                if (!token_types.isLogicalOperator(t)) return null;
-                return if (std.mem.eql(u8, t, "&&")) .@"and" else .@"or";
+        return switch (tok.kind) {
+            .operator => |t| token_types.parseLogicalOperator(t),
+            .word => |segs| blk: {
+                if (segs.len != 1 or segs[0].quotes != .none) break :blk null;
+                break :blk token_types.parseLogicalOperator(segs[0].text);
             },
-            .word => |segs| {
-                if (segs.len != 1 or segs[0].quotes != .none) return null;
-                if (!token_types.isLogicalOperator(segs[0].text)) return null;
-                return if (std.mem.eql(u8, segs[0].text, "and")) .@"and" else .@"or";
-            },
-            .separator => return null,
-        }
+            .separator => null,
+        };
     }
 
     // =========================================================================
@@ -315,7 +305,7 @@ pub const Parser = struct {
             if (!token_types.isPipeOperator(tok.kind.operator)) break;
 
             _ = self.advance();
-            self.skipSeperators();
+            self.skipSeparators();
             const cmd = try self.parseCommand() orelse return ParseError.UnexpectedEOF;
             try commands.append(self.allocator, cmd);
         }
@@ -334,7 +324,7 @@ pub const Parser = struct {
 
         while (self.tryParseLogicalOp()) |op| {
             _ = self.advance();
-            self.skipSeperators();
+            self.skipSeparators();
             const pipeline = try self.parsePipeline() orelse return ParseError.UnexpectedEOF;
             try chains.append(self.allocator, .{ .op = op, .pipeline = pipeline });
         }
@@ -345,6 +335,17 @@ pub const Parser = struct {
     // =========================================================================
     // Block scanning helpers
     // =========================================================================
+
+    /// Checks if the previous token is "else", used to detect "else if" patterns.
+    /// Returns true if the token before the current position is an unquoted "else" word.
+    fn isPrevTokenElse(self: *const Parser) bool {
+        if (self.pos == 0) return false;
+        const prev_tok = self.tokens[self.pos - 1];
+        return prev_tok.kind == .word and
+            prev_tok.kind.word.len == 1 and
+            prev_tok.kind.word[0].quotes == .none and
+            std.mem.eql(u8, prev_tok.kind.word[0].text, "else");
+    }
 
     /// Scans forward to find a block terminator, handling nested blocks.
     /// Returns the position of the terminator, leaving the parser AT the terminator (not past it).
@@ -357,14 +358,7 @@ pub const Parser = struct {
         while (self.pos < self.tokens.len) {
             if (self.isBlockStart()) {
                 // Check if this is "else if" - don't increment depth since it's part of the same if statement
-                const is_else_if = blk: {
-                    if (!self.isOp("if") or self.pos == 0) break :blk false;
-                    const prev_tok = self.tokens[self.pos - 1];
-                    break :blk prev_tok.kind == .word and
-                        prev_tok.kind.word.len == 1 and
-                        prev_tok.kind.word[0].quotes == .none and
-                        std.mem.eql(u8, prev_tok.kind.word[0].text, "else");
-                };
+                const is_else_if = self.isOp("if") and self.isPrevTokenElse();
                 if (!is_else_if) {
                     depth += 1;
                 }
@@ -390,13 +384,19 @@ pub const Parser = struct {
     // Source extraction utilities
     // =========================================================================
 
-    /// Extracts source text between two token positions.
+    /// Extracts source text between two token positions using byte indices.
     /// Returns empty string if positions are invalid or input is unavailable.
+    ///
+    /// Note: Uses start_byte of token at end_pos (not the end_byte), which
+    /// effectively captures text up to (but not including) the end_pos token.
+    /// This is useful for extracting source between keywords (e.g., "if" body before "else").
     fn extractSourceRange(self: *const Parser, start_pos: usize, end_pos: usize) []const u8 {
         if (self.input.len == 0) return "";
         if (start_pos >= end_pos or start_pos >= self.tokens.len) return "";
 
         const start_byte = self.tokens[start_pos].span.start;
+
+        // End byte is either the start of the end_pos token, or end of input
         const end_byte = if (end_pos < self.tokens.len)
             self.tokens[end_pos].span.start
         else
@@ -419,7 +419,7 @@ pub const Parser = struct {
     /// Advances past the condition and skips trailing separators.
     fn captureCondition(self: *Parser, terminators: []const []const u8) []const u8 {
         const start = self.pos;
-        while (self.pos < self.tokens.len and !self.isSeperator()) {
+        while (self.pos < self.tokens.len and !self.isSeparator()) {
             for (terminators) |term| {
                 if (self.isOp(term)) {
                     const result = self.extractSourceRange(start, self.pos);
@@ -429,7 +429,7 @@ pub const Parser = struct {
             _ = self.advance();
         }
         const result = self.extractSourceRange(start, self.pos);
-        self.skipSeperators();
+        self.skipSeparators();
         return std.mem.trim(u8, result, " \t\n");
     }
 
@@ -440,7 +440,7 @@ pub const Parser = struct {
     /// Parses a function definition: `fun name ... end`
     fn parseFunctionDefinition(self: *Parser) ParseError!Statement {
         _ = self.advance(); // consume 'fun'
-        self.skipSeperators();
+        self.skipSeparators();
 
         // Expect function name (a word)
         if (!self.isWord()) return ParseError.InvalidFunctionName;
@@ -454,7 +454,7 @@ pub const Parser = struct {
             return ParseError.InvalidFunctionName;
         };
 
-        self.skipSeperators();
+        self.skipSeparators();
 
         const body = try self.captureBlockBody(&.{}, ParseError.UnterminatedFunction);
         _ = self.advance(); // consume 'end'
@@ -477,7 +477,7 @@ pub const Parser = struct {
         while (self.pos < self.tokens.len) {
             if (self.isOp("else")) {
                 _ = self.advance(); // consume 'else'
-                self.skipSeperators();
+                self.skipSeparators();
 
                 if (self.isOp("if")) {
                     // else if - parse another branch
@@ -507,7 +507,7 @@ pub const Parser = struct {
     /// Parses a single if/else-if branch (condition + body).
     /// Expects parser to be positioned after 'if' keyword.
     fn parseIfBranch(self: *Parser) ParseError!IfBranch {
-        self.skipSeperators();
+        self.skipSeparators();
 
         const condition = self.captureCondition(&.{ "end", "else" });
         const body = try self.captureBlockBody(&.{"else"}, ParseError.UnterminatedIf);
@@ -518,7 +518,7 @@ pub const Parser = struct {
     /// Parses a for loop: `for var in items... end`
     fn parseForStatement(self: *Parser) ParseError!Statement {
         _ = self.advance(); // consume 'for'
-        self.skipSeperators();
+        self.skipSeparators();
 
         // Parse variable name
         if (!self.isWord()) return ParseError.InvalidForLoop;
@@ -531,12 +531,12 @@ pub const Parser = struct {
             return ParseError.InvalidForLoop;
         };
 
-        self.skipSeperators();
+        self.skipSeparators();
 
         // Expect 'in' keyword
         if (!self.isOp("in")) return ParseError.InvalidForLoop;
         _ = self.advance(); // consume 'in'
-        self.skipSeperators();
+        self.skipSeparators();
 
         // Items: everything until separator (newline or semicolon)
         const items_source = self.captureCondition(&.{"end"});
@@ -553,7 +553,7 @@ pub const Parser = struct {
     /// Parses a while loop: `while condition ... end`
     fn parseWhileStatement(self: *Parser) ParseError!Statement {
         _ = self.advance(); // consume 'while'
-        self.skipSeperators();
+        self.skipSeparators();
 
         const condition = self.captureCondition(&.{"end"});
         const body = try self.captureBlockBody(&.{}, ParseError.UnterminatedWhile);
@@ -604,7 +604,7 @@ pub const Parser = struct {
             _ = self.advance(); // consume 'defer'
             // Capture the rest of the line as the deferred command (until separator)
             const start = self.pos;
-            while (self.pos < self.tokens.len and !self.isSeperator()) {
+            while (self.pos < self.tokens.len and !self.isSeparator()) {
                 _ = self.advance();
             }
             const cmd_source = std.mem.trim(u8, self.extractSourceRange(start, self.pos), " \t\n");
@@ -653,9 +653,9 @@ pub const Parser = struct {
     pub fn parse(self: *Parser) ParseError!Program {
         var statements: std.ArrayListUnmanaged(Statement) = .empty;
 
-        self.skipSeperators();
+        self.skipSeparators();
         while (self.pos < self.tokens.len) {
-            self.skipSeperators();
+            self.skipSeparators();
             if (self.pos >= self.tokens.len) break;
 
             if (try self.parseStatement()) |stmt| {
@@ -665,8 +665,8 @@ pub const Parser = struct {
             }
 
             if (self.pos < self.tokens.len) {
-                if (self.isSeperator()) {
-                    self.skipSeperators();
+                if (self.isSeparator()) {
+                    self.skipSeparators();
                 } else if (self.isOp("&")) {
                     continue;
                 } else {
