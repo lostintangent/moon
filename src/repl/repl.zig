@@ -23,7 +23,7 @@ const prompt = @import("prompt.zig");
 const Editor = @import("editor/editor.zig").Editor;
 
 /// History file name stored in user's home directory.
-const HISTORY_FILE = ".oshen_log";
+const HISTORY_FILE = ".oshen_history";
 
 /// Errors that can occur during command evaluation.
 /// This is the union of all errors from the shell pipeline stages.
@@ -88,6 +88,14 @@ pub fn run(allocator: std.mem.Allocator, state: *State, evalFn: EvalFn) !void {
         _ = evalFn(allocator, state, line) catch |err| {
             io.printError("oshen: {}\n", .{err});
         };
+
+        // Add to history with context (CWD and exit status)
+        const cwd = state.getCwd() catch "";
+        _ = editor.hist.add(.{
+            .command = line,
+            .cwd = cwd,
+            .exit_status = state.status,
+        });
 
         // Re-enable raw mode for the next prompt
         try editor.enableRawMode();

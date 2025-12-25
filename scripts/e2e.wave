@@ -19,19 +19,19 @@ fun test_case
     # Interpret escape sequences in expected value
     echo -n $3 => expected
 
-    set TOTAL (math $TOTAL + 1)
+    increment TOTAL
     eval "$cmd" => output
 
     if test "$output" = "$expected"
         print -n --green "✓ "
         print "$name"
-        set PASS (math $PASS + 1)
+        increment PASS
     else
         print -n --red "✗ "
         print "$name"
         print "  Expected: '$expected'"
         print "  Got:      '$output'"
-        set FAIL (math $FAIL + 1)
+        increment FAIL
     end
 end
 
@@ -40,20 +40,20 @@ fun test_exit_code
     var cmd $2
     var expected_code $3
 
-    set TOTAL (math $TOTAL + 1)
+    increment TOTAL
     eval "$cmd"
     var exit_code $status
 
     if test $exit_code = $expected_code
         print -n --green "✓ "
         print "$name"
-        set PASS (math $PASS + 1)
+        increment PASS
     else
         print -n --red "✗ "
         print "$name"
         print "  Expected exit: $expected_code"
         print "  Got exit:      $exit_code"
-        set FAIL (math $FAIL + 1)
+        increment FAIL
     end
 end
 
@@ -151,7 +151,7 @@ test_case "Multiple substitutions" 'echo $(echo a) $(echo b)' "a b"
 test_case "Nested substitution" 'echo $(echo $(echo nested))' "nested"
 test_case "Substitution with variable" 'var x world; echo $(echo $x)' "world"
 test_case "Empty substitution" 'echo [$(echo)]' "[]"
-test_case "Substitution arithmetic" 'echo (math 2 + 2)' "4"
+test_case "Substitution arithmetic" 'echo (= 2 + 2)' "4"
 test_case "Multi-word substitution" 'echo $(echo one two)' "one two"
 
 # Bare paren syntax (fish-style)
@@ -186,19 +186,60 @@ test_case "Else if all false" "if test 1 -eq 2; echo first; else if test 2 -eq 3
 test_exit_code "Test not equal" "test 1 -ne 2" "0"
 
 # ============================================================================
-# Loops (For/While)
+# Loops (Each/For/While)
 # ============================================================================
-print_header "Loops (9 tests)"
+print_header "Each Loops (22 tests)"
 
-test_case "For loop empty list" "for x in ; echo \$x; end" ""
-test_case "For loop single item" "for x in single; echo \$x; end" "single"
-test_case "For inline" "for x in a; echo \$x; end" "a"
-test_case "Empty for body" "for x in a b c; end; echo done" "done"
+# Each with implicit $item and $index
+test_case "Each implicit item" "each a b c; echo -n \$item; end" "abc"
+test_case "Each implicit index" "each a b c; echo -n \$index; end" "123"
+test_case "Each item and index" "each x y; echo \$item:\$index; end" "x:1
+y:2"
+
+# Each with explicit variable
+test_case "Each with named var" "each val in a b c; echo -n \$val; end" "abc"
+test_case "Each named var has index" "each v in x y; echo \$v-\$index; end" "x-1
+y-2"
+
+# For as alias (same behavior as each)
+test_case "For as each alias" "for a b c; echo -n \$item; end" "abc"
+test_case "For implicit has index" "for x y z; echo -n \$index; end" "123"
+test_case "For with named var" "for v in 1 2 3; echo -n \$v; end" "123"
+
+# Each with variables and command substitution
+test_case "Each with variable list" "var items x y z; each \$items; echo -n \$item; end" "xyz"
+test_case "Each with command sub" "each line in (printf 'a\nb'); echo -n \$line; end" "ab"
+
+# Break and continue in each
+test_case "Each with break" "each 1 2 3 4 5; if test \$item = 3; break; end; echo -n \$item; end" "12"
+test_case "Each with continue" "each 1 2 3 4 5; if test \$item = 3; continue; end; echo -n \$item; end" "1245"
+
+# Nested each loops
+test_case "Nested each loops" "each a b; var outer \$item; each 1 2; echo -n \$outer\$item; end; end" "a1a2b1b2"
+test_case "Nested each index" "each a b; var oi \$index; each 1 2; echo -n \$oi\$index; end; end" "11122122"
+
+# Edge cases
+test_case "Each single item" "each only; echo \$item:\$index; end" "only:1"
+test_case "Each inline form" "each a b c; echo -n \$item; end" "abc"
+
+# Variable scoping - $item and $index restored after loop
+test_case "item unset after loop" "each a b; end; echo [\$item]" "[]"
+test_case "index unset after loop" "each a b; end; echo [\$index]" "[]"
+test_case "Outer item restored" "var item outer; each a b; end; echo \$item" "outer"
+test_case "Outer index restored" "var index 99; each a b; end; echo \$index" "99"
+test_case "Nested item shadowing" "each X Y; var o \$item; each 1 2; end; echo -n \$item; end" "XY"
+test_case "Nested index shadowing" "each X Y; var oi \$index; each 1 2; end; echo -n \$index; end" "12"
+
+# ============================================================================
+# While Loops and Loop Control
+# ============================================================================
+print_header "While Loops (5 tests)"
+
 test_case "While false" "while false; echo never; end; echo done" "done"
-test_exit_code "For loop runs" "for x in a b c; echo \$x; end" "0"
 test_exit_code "While with break" "var i 0; while true; var i 1; break; end" "0"
-test_exit_code "Continue skips iteration" "for x in 1 2 3; if test \$x = 2; continue; end; echo \$x; end" "0"
-test_case "Continue outputs correct values" "for x in a b c; if test \$x = b; continue; end; echo -n \$x; end" "ac"
+test_exit_code "For continue skips" "for x in 1 2 3; if test \$x = 2; continue; end; echo \$x; end" "0"
+test_case "For continue output" "for x in a b c; if test \$x = b; continue; end; echo -n \$x; end" "ac"
+test_case "Empty loop body" "for x in a b c; end; echo done" "done"
 
 # ============================================================================
 # Functions
@@ -260,7 +301,7 @@ test_case "String capture =>" "echo hello => x; echo \$x" "hello"
 test_case "Capture to new var" "echo world => greeting; echo \$greeting" "world"
 test_case "Capture empty" "echo => x; echo [\$x]" "[]"
 test_case "Capture multi-word" "echo one two three => words; echo \$words" "one two three"
-test_case "Capture command output" "math 2 + 3 => result; echo \$result" "5"
+test_case "Capture command output" "= 2 + 3 => result; echo \$result" "5"
 test_case "Multiple captures" "echo a => x; echo b => y; echo \$x \$y" "a b"
 
 # ============================================================================
@@ -308,13 +349,13 @@ var prev_worked $?
 if test $prev_worked -eq 0
     print -n --green "✓ "
     print "CD - returns to previous"
-    var PASS (math $PASS + 1)
+    increment PASS
 else
     print -n --red "✗ "
     print "CD - returns to previous"
-    var FAIL (math $FAIL + 1)
+    increment FAIL
 end
-var TOTAL (math $TOTAL + 1)
+increment TOTAL
 
 # ============================================================================
 # Builtins
@@ -500,7 +541,7 @@ print_header "Complex Scenarios (6 tests)"
 test_case "Function with multiple returns" "fun check; if test \$1 = a; return 1; else if test \$1 = b; return 2; else; return 3; end; end; check b; echo \$?" "2"
 test_exit_code "Nested loops with break" "for x in 1 2; for y in a b c; echo \$x\$y; if test \$y = b; break; end; end; end" "0"
 test_exit_code "Conditional in loop" "for i in 1 2 3 4 5; if test \$i -gt 3; echo \$i; end; end" "0"
-test_case "Arithmetic in loop" "var sum 0; for i in 1 2 3; var sum (math \$sum + \$i); end; echo \$sum" "6"
+test_case "Arithmetic in loop" "var sum 0; for i in 1 2 3; var sum (= \$sum + \$i); end; echo \$sum" "6"
 test_case "Pipeline with multiple stages" "printf '1\n2\n3\n4\n5\n' | head -n 3 | tail -n 1" "3"
 test_case "Capture in conditional" "echo 5 => num; if test \$num -eq 5; echo match; end" "match"
 
@@ -556,33 +597,61 @@ outer_cleanup"
 test_exit_code "Defer preserves exit status" "fun f; defer echo cleanup; return 42; end; f" "42"
 
 # ============================================================================
-# Math Builtin
+# Calc Builtin (and = alias)
 # ============================================================================
-print_header "Math Builtin (14 tests)"
+print_header "Calc Builtin (20 tests)"
 
-# Basic operations
-test_case "Math addition" 'math 2 + 3' "5"
-test_case "Math subtraction" 'math 10 - 3' "7"
-test_case "Math multiplication" 'math "4 * 5"' "20"
-test_case "Math division" 'math 20 / 4' "5"
-test_case "Math modulo" 'math 17 % 5' "2"
+# Basic operations (using = alias)
+test_case "Calc addition" '= 2 + 3' "5"
+test_case "Calc subtraction" '= 10 - 3' "7"
+test_case "Calc multiplication" '= "4 * 5"' "20"
+test_case "Calc division" '= 20 / 4' "5"
+test_case "Calc modulo" '= 17 % 5' "2"
 
 # Operator precedence
-test_case "Math precedence mul before add" 'math "2 + 3 * 4"' "14"
-test_case "Math precedence with parens" 'math "(2 + 3) * 4"' "20"
-test_case "Math nested parens" 'math "((2 + 3) * 2) + 1"' "11"
+test_case "Calc precedence mul before add" '= "2 + 3 * 4"' "14"
+test_case "Calc precedence with parens" '= "(2 + 3) * 4"' "20"
+test_case "Calc nested parens" '= "((2 + 3) * 2) + 1"' "11"
 
 # Unary minus
-test_case "Math negative number" 'math -5 + 10' "5"
-test_case "Math double negative" 'math "- -5"' "5"
+test_case "Calc negative number" '= -5 + 10' "5"
+test_case "Calc double negative" '= "- -5"' "5"
 
 # With variables and command substitution
-test_case "Math with variable" 'var x 5; math $x + 3' "8"
-test_case "Math with bare paren capture" 'var result (math 3 + 4); echo $result' "7"
-test_case "Math in loop" 'var sum 0; for i in 1 2 3; set sum (math $sum + $i); end; echo $sum' "6"
+test_case "Calc with variable" 'var x 5; = $x + 3' "8"
+test_case "Calc with bare paren capture" 'var result (= 3 + 4); echo $result' "7"
+test_case "Calc in loop" 'var sum 0; for i in 1 2 3; set sum (= $sum + $i); end; echo $sum' "6"
+
+# Test calc name (not just = alias)
+test_case "Calc name works" 'calc 10 + 5' "15"
+test_case "Calc name with parens" 'var x (calc 2 "*" 3); echo $x' "6"
+
+# Test x as multiplication operator (like Fish shell)
+test_case "Calc with x operator" '= 4 x 5' "20"
+test_case "Calc x operator multiple" '= 2 x 3 x 4' "24"
+test_case "Calc x with precedence" '= 2 + 3 x 4' "14"
+test_case "Calc x in capture" 'var result (= 10 x 5); echo $result' "50"
 
 # Error handling
-test_exit_code "Math division by zero" 'math 5 / 0' "1"
+test_exit_code "Calc division by zero" '= 5 / 0' "1"
+
+# ============================================================================
+# Increment Builtin
+# ============================================================================
+print_header "Increment Builtin (9 tests)"
+
+# Basic increment
+test_case "Increment by 1" 'var count 5; increment count; echo $count' "6"
+test_case "Increment by 5" 'var count 10; increment count --by 5; echo $count' "15"
+test_case "Increment by negative (decrement)" 'var count 10; increment count --by -3; echo $count' "7"
+test_case "Increment from 0" 'var count 0; increment count; echo $count' "1"
+test_case "Increment negative number" 'var count -5; increment count; echo $count' "-4"
+test_case "Increment multiple times" 'var n 1; increment n; increment n; increment n; echo $n' "4"
+
+# Error handling
+test_exit_code "Increment nonexistent variable" 'increment nonexistent' "1"
+test_exit_code "Increment non-numeric variable" 'var text hello; increment text' "1"
+test_exit_code "Increment with non-numeric --by" 'var count 5; increment count --by abc' "1"
 
 # ============================================================================
 # Print Summary
@@ -599,7 +668,7 @@ print --red "Failed:       $FAIL"
 print ""
 
 # Calculate pass rate (using * without escape for oshen)
-var PASS_RATE (math $PASS '*' 100 / $TOTAL)
+var PASS_RATE (= $PASS '*' 100 / $TOTAL)
 print "Pass Rate: $PASS_RATE%"
 print ""
 

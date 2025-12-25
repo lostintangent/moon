@@ -1,101 +1,124 @@
-//! Suggest: autosuggestions for the line editor.
+//! Suggest: context-aware autosuggestions for the line editor.
 //!
-//! Provides fish-style autosuggestions based on command history prefix matching.
-//! As the user types, shows the most recent history entry that starts with
-//! the current input as dimmed text after the cursor.
+//! Provides fish-style autosuggestions using the unified scoring from history.zig.
+//! See that module for scoring weights and algorithm details.
 
 const std = @import("std");
+const history = @import("../history.zig");
+const History = history.History;
 
-const History = @import("../history.zig").History;
-
-// =============================================================================
-// Public API
-// =============================================================================
-
-/// Find a suggestion for the given input by searching history.
-/// Returns the suffix to append (not the full suggestion) or null if none found.
-pub fn fromHistory(input: []const u8, hist: *const History) ?[]const u8 {
+/// Find the best suggestion for the given input.
+/// Returns the suffix to append (not the full command) or null if none found.
+pub fn fromHistory(input: []const u8, hist: *const History, cwd: []const u8) ?[]const u8 {
     if (input.len == 0) return null;
 
-    // Search history from most recent to oldest
-    var i = hist.entries.items.len;
-    while (i > 0) {
-        i -= 1;
-        const entry = hist.entries.items[i];
+    const now = std.time.timestamp();
+    var best: ?[]const u8 = null;
+    var best_score: f64 = -1;
 
-        // Check if this history entry starts with the current input
-        if (entry.len > input.len and std.mem.startsWith(u8, entry, input)) {
-            return entry[input.len..];
+    for (hist.entries.items) |e| {
+        if (e.command.len <= input.len) continue;
+        if (!std.mem.startsWith(u8, e.command, input)) continue;
+
+        const score = history.scoreEntry(&e, cwd, now);
+        if (score > best_score) {
+            best_score = score;
+            best = e.command[input.len..];
         }
     }
 
-    return null;
+    return best;
 }
 
 // =============================================================================
 // Tests
 // =============================================================================
 
-test "no suggestion for empty input" {
-    var hist = History.init(std.testing.allocator);
-    defer hist.deinit();
+const testing = std.testing;
 
-    hist.add("echo hello");
-    try std.testing.expect(fromHistory("", &hist) == null);
+test "match: returns suffix for matching prefix" {
+    var hist = History.init(testing.allocator);
+    defer hist.deinit();
+    _ = hist.add(.{ .command = "git commit -m 'test'", .cwd = "/", .exit_status = 0 });
+
+    const suggestion = fromHistory("git co", &hist, "/");
+    try testing.expect(suggestion != null);
+    try testing.expectEqualStrings("mmit -m 'test'", suggestion.?);
 }
 
-test "finds matching history entry" {
-    var hist = History.init(std.testing.allocator);
+test "match: selects most recent when multiple matches" {
+    var hist = History.init(testing.allocator);
     defer hist.deinit();
+    _ = hist.add(.{ .command = "echo hello", .cwd = "/", .exit_status = 0 });
+    _ = hist.add(.{ .command = "echo world", .cwd = "/", .exit_status = 0 });
 
-    hist.add("echo hello");
-    hist.add("echo world");
-
-    // Should match "echo world" (most recent) and return " world"
-    const suggestion = fromHistory("echo", &hist);
-    try std.testing.expect(suggestion != null);
-    try std.testing.expectEqualStrings(" world", suggestion.?);
+    const suggestion = fromHistory("echo", &hist, "/");
+    try testing.expect(suggestion != null);
+    try testing.expectEqualStrings(" world", suggestion.?);
 }
 
-test "returns suffix only" {
-    var hist = History.init(std.testing.allocator);
+test "match: no suggestion when no prefix match" {
+    var hist = History.init(testing.allocator);
     defer hist.deinit();
-
-    hist.add("git commit -m 'test'");
-
-    const suggestion = fromHistory("git co", &hist);
-    try std.testing.expect(suggestion != null);
-    try std.testing.expectEqualStrings("mmit -m 'test'", suggestion.?);
+    _ = hist.add(.{ .command = "echo hello", .cwd = "/", .exit_status = 0 });
+    try testing.expect(fromHistory("xyz", &hist, "/") == null);
 }
 
-test "no match returns null" {
-    var hist = History.init(std.testing.allocator);
+test "match: no suggestion for exact match" {
+    var hist = History.init(testing.allocator);
     defer hist.deinit();
-
-    hist.add("echo hello");
-
-    try std.testing.expect(fromHistory("xyz", &hist) == null);
+    _ = hist.add(.{ .command = "echo hello", .cwd = "/", .exit_status = 0 });
+    try testing.expect(fromHistory("echo hello", &hist, "/") == null);
 }
 
-test "prefers most recent match" {
-    var hist = History.init(std.testing.allocator);
+test "empty: no suggestion for empty input" {
+    var hist = History.init(testing.allocator);
     defer hist.deinit();
-
-    hist.add("cd src");
-    hist.add("cd test");
-    hist.add("cd docs");
-
-    const suggestion = fromHistory("cd ", &hist);
-    try std.testing.expect(suggestion != null);
-    try std.testing.expectEqualStrings("docs", suggestion.?);
+    _ = hist.add(.{ .command = "echo hello", .cwd = "/", .exit_status = 0 });
+    try testing.expect(fromHistory("", &hist, "/") == null);
 }
 
-test "exact match returns null (no suffix)" {
-    var hist = History.init(std.testing.allocator);
+test "empty: no suggestion from empty history" {
+    var hist = History.init(testing.allocator);
+    defer hist.deinit();
+    try testing.expect(fromHistory("echo", &hist, "/") == null);
+}
+
+test "ranking: prefers current directory over other" {
+    var hist = History.init(testing.allocator);
+    defer hist.deinit();
+    _ = hist.add(.{ .command = "make test", .cwd = "/project", .exit_status = 0 });
+    _ = hist.add(.{ .command = "make build", .cwd = "/other", .exit_status = 0 });
+
+    const suggestion = fromHistory("make", &hist, "/project");
+    try testing.expect(suggestion != null);
+    try testing.expectEqualStrings(" test", suggestion.?);
+}
+
+test "ranking: prefers successful over failed" {
+    var hist = History.init(testing.allocator);
+    defer hist.deinit();
+    _ = hist.add(.{ .command = "make success", .cwd = "/", .exit_status = 0 });
+    _ = hist.add(.{ .command = "make failed", .cwd = "/", .exit_status = 1 });
+
+    const suggestion = fromHistory("make", &hist, "/");
+    try testing.expect(suggestion != null);
+    try testing.expectEqualStrings(" success", suggestion.?);
+}
+
+test "ranking: prefers frequent over rare" {
+    var hist = History.init(testing.allocator);
     defer hist.deinit();
 
-    hist.add("echo hello");
+    // Add rare command once
+    _ = hist.add(.{ .command = "npm run rare", .cwd = "/", .exit_status = 0 });
 
-    // Exact match - nothing to suggest
-    try std.testing.expect(fromHistory("echo hello", &hist) == null);
+    // Add frequent command multiple times to build frequency
+    _ = hist.add(.{ .command = "npm run frequent", .cwd = "/", .exit_status = 0 });
+    _ = hist.add(.{ .command = "npm run frequent", .cwd = "/", .exit_status = 0 });
+    _ = hist.add(.{ .command = "npm run frequent", .cwd = "/", .exit_status = 0 });
+
+    const suggestion = fromHistory("npm run", &hist, "/");
+    try testing.expect(suggestion != null);
+    try testing.expectEqualStrings(" frequent", suggestion.?);
 }

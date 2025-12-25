@@ -2,7 +2,7 @@
 //!
 //! This module handles high-level execution flow:
 //! - Statement dispatch (commands, functions, control flow)
-//! - Control flow statements (if, for, while, break, continue)
+//! - Control flow statements (if, for, each, while, break, continue)
 //! - Background jobs and output capture
 //!
 //! Pipeline execution and job control are delegated to separate modules.
@@ -16,7 +16,6 @@ const io = @import("../../terminal/io.zig");
 const interpreter_mod = @import("../interpreter.zig");
 const expand = @import("../expansion/word.zig");
 const lexer_mod = @import("../../language/lexer.zig");
-const expansion = @import("../expansion/word.zig");
 const expansion_statement = @import("../expansion/statement.zig");
 
 // Delegate to specialized modules
@@ -61,7 +60,7 @@ pub fn executeStatement(allocator: std.mem.Allocator, state: *State, stmt: ast.S
             return 0;
         },
         .@"if" => |if_stmt| executeIfStatement(allocator, state, if_stmt),
-        .@"for" => |for_stmt| executeForStatement(allocator, state, for_stmt),
+        .each => |each_stmt| executeEachStatement(allocator, state, each_stmt),
         .@"while" => |while_stmt| executeWhileStatement(allocator, state, while_stmt),
         .@"break" => {
             state.loop_break = true;
@@ -164,60 +163,72 @@ fn executeIfStatement(allocator: std.mem.Allocator, state: *State, if_stmt: expa
     return 0;
 }
 
-/// Execute a for loop by iterating over items and running body for each.
+/// Execute an each loop (for is an alias).
+///
+/// Sets $item (or custom var) and $index (1-based) on each iteration.
+/// Inner loops shadow outer loop variables; values are restored on loop exit.
 ///
 /// OPTIMIZATION: Parses body once upfront, then executes the pre-parsed AST
 /// on each iteration. This avoids re-lexing/parsing on every loop iteration.
-fn executeForStatement(allocator: std.mem.Allocator, state: *State, for_stmt: expansion_types.ast.ForStatement) u8 {
-    // Arena for items expansion and body AST caching
+fn executeEachStatement(allocator: std.mem.Allocator, state: *State, stmt: expansion_types.ast.EachStatement) u8 {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const arena_alloc = arena.allocator();
 
-    // Parse items_source as words and expand them
-    var items: std.ArrayListUnmanaged([]const u8) = .empty;
+    // Save previous values of loop variables (for nested loop shadowing).
+    // Must dupe because the original slices point into state's memory,
+    // which gets freed when we set the loop variable.
+    const old_item: ?[]const u8 = if (state.getVar(stmt.variable)) |v|
+        arena_alloc.dupe(u8, v) catch null
+    else
+        null;
+    const old_index: ?[]const u8 = if (state.getVar("index")) |v|
+        arena_alloc.dupe(u8, v) catch null
+    else
+        null;
 
-    var lexer = lexer_mod.Lexer.init(arena_alloc, for_stmt.items_source);
-    const tokens = lexer.tokenize() catch |err| {
-        io.printError("for: items parse error: {}\n", .{err});
-        return 1;
-    };
-
-    var expand_ctx = expand.ExpandContext.init(arena_alloc, state);
-    defer expand_ctx.deinit();
-
-    for (tokens) |tok| {
-        if (tok.kind == .word) {
-            const expanded = expand.expandWord(&expand_ctx, tok.kind.word) catch |err| {
-                io.printError("for: expand error: {}\n", .{err});
-                return 1;
-            };
-            for (expanded) |word| {
-                items.append(arena_alloc, word) catch |err| {
-                    io.printError("for: item append error: {}\n", .{err});
-                    return 1;
-                };
-            }
+    // Restore loop variables on exit (handles break, continue, return, normal exit)
+    defer {
+        if (old_item) |v| {
+            state.setVar(stmt.variable, v) catch {};
+        } else {
+            state.unsetVar(stmt.variable);
+        }
+        if (old_index) |v| {
+            state.setVar("index", v) catch {};
+        } else {
+            state.unsetVar("index");
         }
     }
 
-    // Parse body once upfront (optimization: avoid re-parsing on each iteration)
-    const body_parsed = interpreter_mod.parseInput(arena_alloc, for_stmt.body) catch |err| {
-        io.printError("for: body parse error: {}\n", .{err});
+    // Expand items_source into a list of strings
+    const items = expandItems(arena_alloc, state, stmt.items_source) orelse return 1;
+
+    // Parse body once (cached for all iterations)
+    const body_ast = interpreter_mod.parseInput(arena_alloc, stmt.body) catch |err| {
+        io.printError("each: body parse error: {}\n", .{err});
         return 1;
     };
 
     // Execute body for each item
+    var index_buf: [20]u8 = undefined;
     var last_status: u8 = 0;
-    for (items.items) |item| {
-        state.setVar(for_stmt.variable, item) catch |err| {
-            io.printError("for: set var error: {}\n", .{err});
+
+    for (items, 0..) |item, i| {
+        state.setVar(stmt.variable, item) catch |err| {
+            io.printError("each: set var error: {}\n", .{err});
             return 1;
         };
 
-        // Execute pre-parsed body (expansion happens inside executeAst)
-        last_status = interpreter_mod.executeAst(allocator, state, body_parsed) catch |err| {
-            io.printError("for: body error: {}\n", .{err});
+        // Set $index (1-based, matching Oshen's 1-based array indexing)
+        const index_str = std.fmt.bufPrint(&index_buf, "{d}", .{i + 1}) catch unreachable;
+        state.setVar("index", index_str) catch |err| {
+            io.printError("each: set index error: {}\n", .{err});
+            return 1;
+        };
+
+        last_status = interpreter_mod.executeAst(allocator, state, body_ast) catch |err| {
+            io.printError("each: body error: {}\n", .{err});
             return 1;
         };
 
@@ -229,6 +240,37 @@ fn executeForStatement(allocator: std.mem.Allocator, state: *State, for_stmt: ex
     }
 
     return last_status;
+}
+
+/// Expand items_source into a list of strings. Returns null on error.
+fn expandItems(arena_alloc: std.mem.Allocator, state: *State, items_source: []const u8) ?[]const []const u8 {
+    var items: std.ArrayListUnmanaged([]const u8) = .empty;
+
+    var lexer = lexer_mod.Lexer.init(arena_alloc, items_source);
+    const tokens = lexer.tokenize() catch |err| {
+        io.printError("each: items parse error: {}\n", .{err});
+        return null;
+    };
+
+    var expand_ctx = expand.ExpandContext.init(arena_alloc, state);
+    defer expand_ctx.deinit();
+
+    for (tokens) |tok| {
+        if (tok.kind == .word) {
+            const expanded = expand.expandWord(&expand_ctx, tok.kind.word) catch |err| {
+                io.printError("each: expand error: {}\n", .{err});
+                return null;
+            };
+            for (expanded) |word| {
+                items.append(arena_alloc, word) catch |err| {
+                    io.printError("each: append error: {}\n", .{err});
+                    return null;
+                };
+            }
+        }
+    }
+
+    return items.items;
 }
 
 /// Execute a while loop by repeatedly checking condition and running body.
@@ -342,14 +384,14 @@ fn freeCommands(allocator: std.mem.Allocator, cmds: []const ExpandedCmd) void {
 
 /// Expand a pipeline with current state
 fn expandPipeline(allocator: std.mem.Allocator, state: *State, ast_pipeline: expansion_types.ast.Pipeline) ![]const ExpandedCmd {
-    var ctx = expansion.ExpandContext.init(allocator, state);
+    var ctx = expand.ExpandContext.init(allocator, state);
     defer ctx.deinit();
     return expansion_statement.expandPipeline(allocator, &ctx, ast_pipeline);
 }
 
 /// Expand a pipeline in a child process context (exits on error instead of returning)
 fn expandPipelineInChild(allocator: std.mem.Allocator, state: *State, ast_pipeline: expansion_types.ast.Pipeline) []const ExpandedCmd {
-    var ctx = expansion.ExpandContext.init(allocator, state);
+    var ctx = expand.ExpandContext.init(allocator, state);
     defer ctx.deinit();
     return expansion_statement.expandPipeline(allocator, &ctx, ast_pipeline) catch {
         std.posix.exit(1);

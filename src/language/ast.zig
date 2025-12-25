@@ -46,9 +46,14 @@ pub const IfStatement = struct {
     else_body: ?[]const u8,
 };
 
-/// A for loop: `for var in items... end`
-pub const ForStatement = struct {
-    /// The loop variable name
+/// An each loop: `each items... end` or `each var in items... end`
+/// The `for` keyword is an alias for `each`.
+///
+/// Features:
+/// - Optional variable naming (defaults to "item")
+/// - Implicit $index variable (1-based)
+pub const EachStatement = struct {
+    /// The loop variable name (defaults to "item" if not specified)
     variable: []const u8,
     /// The raw source of items to iterate over (parsed on-demand)
     items_source: []const u8,
@@ -179,8 +184,8 @@ pub const StatementKind = union(enum) {
     function: FunctionDefinition,
     /// An if/else-if/else statement
     @"if": IfStatement,
-    /// A for loop
-    @"for": ForStatement,
+    /// An each loop (for is an alias)
+    each: EachStatement,
     /// A while loop
     @"while": WhileStatement,
     /// Break out of the innermost loop

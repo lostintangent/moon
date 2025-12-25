@@ -1,153 +1,390 @@
-//! History: command history management with file persistence.
+//! History: command history with rich metadata for context-aware suggestions.
 //!
-//! Maintains an in-memory list of previously executed commands with:
-//! - Automatic deduplication (consecutive duplicates are ignored)
-//! - Size limiting (oldest entries evicted when capacity reached)
-//! - File persistence (load/save to ~/.oshen_log)
-//! - Search support (for Ctrl+R reverse search)
+//! Each entry tracks command, working directory, timestamp, exit status, and frequency.
+//! This enables intelligent scoring based on directory context, recency, and usage patterns.
+//!
+//! ## Scoring
+//!
+//! Entries are scored for both suggestions and eviction using `scoreEntry`:
+//! - **Directory context (40%)**: Exact match > parent > child > sibling > unrelated
+//! - **Recency (30%)**: Exponential decay with 1-week half-life
+//! - **Frequency (25%)**: Logarithmic growth, capped at 100
+//! - **Success (5%)**: Small bonus for exit code 0
+//!
+//! When `current_cwd` is null (eviction), directory score is 0 and other factors dominate.
+//!
+//! ## Eviction Strategy
+//!
+//! Uses score-based batch eviction for O(1) amortized adds:
+//! - History grows until EVICT_THRESHOLD (12K entries)
+//! - Then prunes to TARGET_SIZE (10K) by removing lowest-scored entries
+//!
+//! ## File Format (OSHEN_HIST_V1)
+//!
+//! Binary format for fast load/save:
+//! ```
+//! OSHEN_HIST_V1\n              # 14-byte magic header
+//! [entry_count: u32]           # Little-endian entry count
+//! Per entry:
+//!   [cmd_len: u16][cmd: bytes] # Command text
+//!   [cwd_len: u16][cwd: bytes] # Working directory
+//!   [timestamp: i64]           # Unix timestamp (seconds)
+//!   [exit_status: u8]          # Exit code (0-255)
+//!   [frequency: u32]           # Usage count
+//! ```
 
 const std = @import("std");
 
+/// Target number of history entries after pruning.
+const TARGET_SIZE: usize = 10_000;
+
+/// Threshold that triggers batch eviction. Allows ~2K new entries between prunes.
+const EVICT_THRESHOLD: usize = 12_000;
+
+/// Magic header identifying the file format version.
+const FILE_MAGIC = "OSHEN_HIST_V1\n";
+
 // =============================================================================
-// Constants
+// Scoring constants
 // =============================================================================
 
-/// Maximum number of history entries to keep in memory.
-const MAX_HISTORY_SIZE = 100;
+/// Scoring weights (sum to 100).
+const weight_directory: f64 = 40.0;
+const weight_recency: f64 = 30.0;
+const weight_frequency: f64 = 25.0;
+const weight_success: f64 = 5.0;
 
-// =============================================================================
-// History
-// =============================================================================
+/// Natural log of 2, for exponential decay calculation.
+const LN_2: f64 = 0.693147180559945;
 
-/// History manager for command line entries.
+/// Recency half-life in seconds (1 week).
+const RECENCY_HALF_LIFE: f64 = 7 * 24 * 60 * 60;
+
+/// A single history entry with full context.
+pub const Entry = struct {
+    command: []const u8,
+    cwd: []const u8,
+    timestamp: i64,
+    exit_status: u8,
+    frequency: u32,
+};
+
+/// Input for adding a new history entry.
+pub const AddInput = struct {
+    command: []const u8,
+    cwd: []const u8,
+    exit_status: u8,
+};
+
+/// Command history with deduplication and frequency tracking.
+///
+/// Entries are deduplicated by (command, cwd) pair. Running the same command
+/// in the same directory increments frequency rather than creating a duplicate.
 pub const History = struct {
     allocator: std.mem.Allocator,
-    /// History entries (oldest first)
-    entries: std.ArrayListUnmanaged([]u8),
+    entries: std.ArrayListUnmanaged(Entry),
+    /// Maps hash(command, cwd) -> entry index for O(1) deduplication.
+    dedup: std.AutoHashMapUnmanaged(u64, usize),
 
     pub fn init(allocator: std.mem.Allocator) History {
-        return .{
-            .allocator = allocator,
-            .entries = .empty,
-        };
+        return .{ .allocator = allocator, .entries = .empty, .dedup = .empty };
     }
 
     pub fn deinit(self: *History) void {
         for (self.entries.items) |entry| {
-            self.allocator.free(entry);
+            self.allocator.free(entry.command);
+            self.allocator.free(entry.cwd);
         }
         self.entries.deinit(self.allocator);
+        self.dedup.deinit(self.allocator);
     }
 
-    /// Add a line to history.
-    /// Returns true if the line was added, false if it was skipped (empty/duplicate)
-    /// or if allocation failed.
-    pub fn add(self: *History, line: []const u8) bool {
-        // Don't add empty lines
-        if (line.len == 0) return false;
+    /// Add a command to history. Increments frequency if command+cwd already exists.
+    /// O(1) for most adds; O(n log n) when pruning is triggered (every ~2K unique entries).
+    pub fn add(self: *History, input: AddInput) bool {
+        if (input.command.len == 0) return false;
 
-        // Don't add duplicates of the most recent entry
-        if (self.entries.items.len > 0) {
-            const last = self.entries.items[self.entries.items.len - 1];
-            if (std.mem.eql(u8, last, line)) return false;
+        const key = hash(input.command, input.cwd);
+        const now = std.time.timestamp();
+
+        // Update existing entry if found (O(1) hash lookup)
+        if (self.dedup.get(key)) |index| {
+            const entry = &self.entries.items[index];
+            entry.frequency += 1;
+            entry.timestamp = now;
+            entry.exit_status = input.exit_status;
+            return true;
         }
 
-        // Remove oldest if at capacity
-        if (self.entries.items.len >= MAX_HISTORY_SIZE) {
-            const removed = self.entries.orderedRemove(0);
-            self.allocator.free(removed);
+        // Create new entry
+        const command = self.allocator.dupe(u8, input.command) catch return false;
+        const cwd = self.allocator.dupe(u8, input.cwd) catch {
+            self.allocator.free(command);
+            return false;
+        };
+
+        const index = self.entries.items.len;
+        self.entries.append(self.allocator, .{
+            .command = command,
+            .cwd = cwd,
+            .timestamp = now,
+            .exit_status = input.exit_status,
+            .frequency = 1,
+        }) catch {
+            self.allocator.free(command);
+            self.allocator.free(cwd);
+            return false;
+        };
+
+        self.dedup.put(self.allocator, key, index) catch {};
+
+        // Prune if we've crossed the threshold
+        if (self.entries.items.len > EVICT_THRESHOLD) {
+            self.pruneToTarget();
         }
 
-        // Add new entry - log OOM in debug builds
-        const copy = self.allocator.dupe(u8, line) catch |err| {
-            std.log.warn("history: failed to save entry: {}", .{err});
-            return false;
-        };
-        self.entries.append(self.allocator, copy) catch |err| {
-            std.log.warn("history: failed to append entry: {}", .{err});
-            self.allocator.free(copy);
-            return false;
-        };
         return true;
     }
 
-    /// Load history from a file
-    pub fn load(self: *History, path: []const u8) void {
-        const file = std.fs.openFileAbsolute(path, .{}) catch return;
-        defer file.close();
+    /// Prune history to TARGET_SIZE by removing lowest-scored entries.
+    /// Keeps entries with highest recency + frequency scores.
+    fn pruneToTarget(self: *History) void {
+        const now = std.time.timestamp();
 
-        const content = file.readToEndAlloc(self.allocator, 1024 * 1024) catch return;
-        defer self.allocator.free(content);
+        // Score all entries
+        const ScoredIndex = struct { index: usize, score: f64 };
+        var scored = self.allocator.alloc(ScoredIndex, self.entries.items.len) catch return;
+        defer self.allocator.free(scored);
 
-        var lines = std.mem.splitScalar(u8, content, '\n');
-        while (lines.next()) |line| {
-            if (line.len == 0) continue;
-            _ = self.add(line);
+        for (self.entries.items, 0..) |entry, i| {
+            // Pass null for cwd - eviction doesn't have directory context
+            scored[i] = .{ .index = i, .score = scoreEntry(&entry, null, now) };
+        }
+
+        // Sort by score descending (highest scores first)
+        std.mem.sort(ScoredIndex, scored, {}, struct {
+            fn cmp(_: void, a: ScoredIndex, b: ScoredIndex) bool {
+                return a.score > b.score;
+            }
+        }.cmp);
+
+        // Mark entries to keep
+        var keep = self.allocator.alloc(bool, self.entries.items.len) catch return;
+        defer self.allocator.free(keep);
+        @memset(keep, false);
+
+        for (scored[0..TARGET_SIZE]) |s| {
+            keep[s.index] = true;
+        }
+
+        // Free entries we're removing
+        for (self.entries.items, 0..) |entry, i| {
+            if (!keep[i]) {
+                self.allocator.free(entry.command);
+                self.allocator.free(entry.cwd);
+            }
+        }
+
+        // Compact: keep only marked entries
+        var write_idx: usize = 0;
+        for (self.entries.items, 0..) |entry, read_idx| {
+            if (keep[read_idx]) {
+                self.entries.items[write_idx] = entry;
+                write_idx += 1;
+            }
+        }
+        self.entries.items.len = write_idx;
+
+        // Rebuild dedup index
+        self.dedup.clearRetainingCapacity();
+        for (self.entries.items, 0..) |entry, index| {
+            self.dedup.put(self.allocator, hash(entry.command, entry.cwd), index) catch {};
         }
     }
 
-    /// Save history to file
-    pub fn save(self: *History, path: []const u8) void {
-        const file = std.fs.createFileAbsolute(path, .{}) catch return;
-        defer file.close();
+    // =========================================================================
+    // Queries
+    // =========================================================================
 
-        for (self.entries.items) |entry| {
-            file.writeAll(entry) catch return;
-            _ = file.write("\n") catch return;
-        }
-    }
-
-    /// Get entry count
     pub fn count(self: *const History) usize {
         return self.entries.items.len;
     }
 
-    /// Get entry at index
-    pub fn get(self: *const History, index: usize) ?[]const u8 {
-        if (index >= self.entries.items.len) return null;
-        return self.entries.items[index];
+    pub fn get(self: *const History, index: usize) ?Entry {
+        return if (index < self.entries.items.len) self.entries.items[index] else null;
     }
 
-    /// Search backwards for an entry containing the query.
-    /// If `start` is provided, search starts before that index (for "find next").
-    /// Returns the index of the matching entry, or null if not found.
-    pub fn search(self: *const History, query: []const u8, start: ?usize) ?usize {
-        if (query.len == 0) return null;
+    // =========================================================================
+    // Persistence
+    // =========================================================================
 
-        var i = start orelse self.entries.items.len;
-        while (i > 0) {
-            i -= 1;
-            if (std.mem.indexOf(u8, self.entries.items[i], query) != null) {
-                return i;
-            }
-        }
-        return null;
+    pub fn load(self: *History, path: []const u8) void {
+        const file = std.fs.openFileAbsolute(path, .{}) catch return;
+        defer file.close();
+
+        const data = file.readToEndAlloc(self.allocator, 100 * 1024 * 1024) catch return;
+        defer self.allocator.free(data);
+
+        self.parse(data);
     }
 
-    /// Count total matches for a query in history
-    pub fn countMatches(self: *const History, query: []const u8) usize {
-        if (query.len == 0) return 0;
-        var total: usize = 0;
-        for (self.entries.items) |entry| {
-            if (std.mem.indexOf(u8, entry, query) != null) {
-                total += 1;
-            }
-        }
-        return total;
+    pub fn save(self: *History, path: []const u8) void {
+        const file = std.fs.createFileAbsolute(path, .{}) catch return;
+        defer file.close();
+
+        file.writeAll(FILE_MAGIC) catch return;
+        file.writeAll(std.mem.asBytes(&@as(u32, @intCast(self.entries.items.len)))) catch return;
+
+        for (self.entries.items) |entry| writeEntry(file, entry) catch return;
     }
 
-    /// Get the position (1-based) of a match index among all matches
-    pub fn getMatchPosition(self: *const History, query: []const u8, match_index: usize) usize {
-        var position: usize = 0;
-        for (self.entries.items, 0..) |entry, i| {
-            if (std.mem.indexOf(u8, entry, query) != null) {
-                position += 1;
-                if (i == match_index) return position;
-            }
+    fn parse(self: *History, data: []const u8) void {
+        if (data.len < FILE_MAGIC.len) return;
+        if (!std.mem.eql(u8, data[0..FILE_MAGIC.len], FILE_MAGIC)) return;
+
+        var position: usize = FILE_MAGIC.len;
+        if (position + 4 > data.len) return;
+
+        const entry_count = std.mem.readInt(u32, data[position..][0..4], .little);
+        position += 4;
+
+        for (0..entry_count) |_| {
+            const entry = self.readEntry(data, &position) orelse break;
+            const index = self.entries.items.len;
+            self.entries.append(self.allocator, entry) catch break;
+            self.dedup.put(self.allocator, hash(entry.command, entry.cwd), index) catch {};
         }
-        return 0;
+    }
+
+    fn readEntry(self: *History, data: []const u8, position: *usize) ?Entry {
+        const command = self.readString(data, position) orelse return null;
+        const cwd = self.readString(data, position) orelse {
+            self.allocator.free(command);
+            return null;
+        };
+
+        if (position.* + 13 > data.len) {
+            self.allocator.free(command);
+            self.allocator.free(cwd);
+            return null;
+        }
+
+        const timestamp = std.mem.readInt(i64, data[position.*..][0..8], .little);
+        const exit_status = data[position.* + 8];
+        const frequency = std.mem.readInt(u32, data[position.* + 9 ..][0..4], .little);
+        position.* += 13;
+
+        return .{
+            .command = command,
+            .cwd = cwd,
+            .timestamp = timestamp,
+            .exit_status = exit_status,
+            .frequency = frequency,
+        };
+    }
+
+    fn readString(self: *History, data: []const u8, position: *usize) ?[]const u8 {
+        if (position.* + 2 > data.len) return null;
+        const length = std.mem.readInt(u16, data[position.*..][0..2], .little);
+        position.* += 2;
+        if (position.* + length > data.len) return null;
+        const string = self.allocator.dupe(u8, data[position.*..][0..length]) catch return null;
+        position.* += length;
+        return string;
+    }
+
+    fn writeEntry(file: std.fs.File, entry: Entry) !void {
+        try file.writeAll(std.mem.asBytes(&@as(u16, @intCast(entry.command.len))));
+        try file.writeAll(entry.command);
+        try file.writeAll(std.mem.asBytes(&@as(u16, @intCast(entry.cwd.len))));
+        try file.writeAll(entry.cwd);
+        try file.writeAll(std.mem.asBytes(&entry.timestamp));
+        try file.writeAll(&[_]u8{entry.exit_status});
+        try file.writeAll(std.mem.asBytes(&entry.frequency));
     }
 };
+
+fn hash(command: []const u8, cwd: []const u8) u64 {
+    var hasher = std.hash.Wyhash.init(0);
+    hasher.update(command);
+    hasher.update("\x00");
+    hasher.update(cwd);
+    return hasher.final();
+}
+
+// =============================================================================
+// Scoring (shared by suggestions and eviction)
+// =============================================================================
+
+/// Score an entry for ranking. Higher = more relevant/valuable.
+/// When `current_cwd` is null, directory scoring is skipped (used for eviction).
+pub fn scoreEntry(entry: *const Entry, current_cwd: ?[]const u8, now: i64) f64 {
+    const dir = if (current_cwd) |cwd| directoryScore(entry.cwd, cwd) else 0.0;
+    return dir * (weight_directory / 100.0) +
+        recencyScore(entry.timestamp, now) * (weight_recency / 100.0) +
+        frequencyScore(entry.frequency) * (weight_frequency / 100.0) +
+        successScore(entry.exit_status) * (weight_success / 100.0);
+}
+
+/// Directory relevance: exact match > parent > child > sibling > unrelated.
+pub fn directoryScore(entry_cwd: []const u8, current_cwd: []const u8) f64 {
+    if (std.mem.eql(u8, entry_cwd, current_cwd)) return 100.0;
+
+    // Entry is parent of current (e.g., /home vs /home/user/project)
+    if (current_cwd.len > entry_cwd.len and
+        std.mem.startsWith(u8, current_cwd, entry_cwd) and
+        (entry_cwd.len == 0 or current_cwd[entry_cwd.len] == '/'))
+        return 50.0;
+
+    // Current is parent of entry (e.g., /home/user vs /home/user/project)
+    if (entry_cwd.len > current_cwd.len and
+        std.mem.startsWith(u8, entry_cwd, current_cwd) and
+        (current_cwd.len == 0 or entry_cwd[current_cwd.len] == '/'))
+        return 30.0;
+
+    // Sibling directories (same parent)
+    if (areSiblingDirectories(entry_cwd, current_cwd))
+        return 20.0;
+
+    return 0.0;
+}
+
+/// Returns true if two paths are sibling directories (share the same parent).
+pub fn areSiblingDirectories(path_a: []const u8, path_b: []const u8) bool {
+    const parent_a = parentDirectory(path_a);
+    const parent_b = parentDirectory(path_b);
+    // Both must have non-root parents (top-level dirs like /var and /home aren't related)
+    if (parent_a.len <= 1 or parent_b.len <= 1) return false;
+    return std.mem.eql(u8, parent_a, parent_b);
+}
+
+/// Returns the parent directory of a path, or empty string if at root.
+pub fn parentDirectory(path: []const u8) []const u8 {
+    if (path.len == 0) return "";
+    const search_end = if (path[path.len - 1] == '/') path.len - 1 else path.len;
+    if (search_end == 0) return "";
+    const last_slash = std.mem.lastIndexOf(u8, path[0..search_end], "/");
+    if (last_slash) |pos| {
+        return if (pos == 0) "/" else path[0..pos];
+    }
+    return "";
+}
+
+/// Exponential decay: score = 100 * 0.5^(age / half_life).
+pub fn recencyScore(timestamp: i64, now: i64) f64 {
+    const age: f64 = @floatFromInt(@max(0, now - timestamp));
+    return 100.0 * std.math.exp(-LN_2 * age / RECENCY_HALF_LIFE);
+}
+
+/// Logarithmic growth: log2(freq + 1) * 20, capped at 100.
+pub fn frequencyScore(frequency: u32) f64 {
+    return @min(std.math.log2(@as(f64, @floatFromInt(frequency + 1))) * 20.0, 100.0);
+}
+
+/// Success bonus: 100 for exit 0, 20 otherwise.
+pub fn successScore(exit_status: u8) f64 {
+    return if (exit_status == 0) 100.0 else 20.0;
+}
 
 // =============================================================================
 // Tests
@@ -155,144 +392,126 @@ pub const History = struct {
 
 const testing = std.testing;
 
-test "history: add and retrieve" {
+test "add: stores command with metadata" {
     var hist = History.init(testing.allocator);
     defer hist.deinit();
 
-    try testing.expect(hist.add("command 1"));
-    try testing.expect(hist.add("command 2"));
-    try testing.expect(hist.add("command 3"));
+    try testing.expect(hist.add(.{ .command = "echo hello", .cwd = "/home", .exit_status = 0 }));
+    try testing.expect(hist.add(.{ .command = "ls -la", .cwd = "/home", .exit_status = 0 }));
 
-    try testing.expectEqual(@as(usize, 3), hist.count());
-    try testing.expectEqualStrings("command 1", hist.get(0).?);
-    try testing.expectEqualStrings("command 2", hist.get(1).?);
-    try testing.expectEqualStrings("command 3", hist.get(2).?);
+    try testing.expectEqual(@as(usize, 2), hist.count());
+    try testing.expectEqualStrings("echo hello", hist.get(0).?.command);
+    try testing.expectEqualStrings("/home", hist.get(0).?.cwd);
 }
 
-test "history: no duplicate consecutive entries" {
+test "add: ignores empty commands" {
     var hist = History.init(testing.allocator);
     defer hist.deinit();
 
-    try testing.expect(hist.add("command 1"));
-    try testing.expect(!hist.add("command 1")); // Duplicate - returns false
-    try testing.expect(hist.add("command 2"));
-    try testing.expect(!hist.add("command 2")); // Duplicate - returns false
+    try testing.expect(!hist.add(.{ .command = "", .cwd = "/home", .exit_status = 0 }));
+    try testing.expectEqual(@as(usize, 0), hist.count());
+}
+
+test "dedup: increments frequency on duplicate command+cwd" {
+    var hist = History.init(testing.allocator);
+    defer hist.deinit();
+
+    _ = hist.add(.{ .command = "git status", .cwd = "/project", .exit_status = 0 });
+    _ = hist.add(.{ .command = "git status", .cwd = "/project", .exit_status = 0 });
+    _ = hist.add(.{ .command = "git status", .cwd = "/project", .exit_status = 0 });
+
+    try testing.expectEqual(@as(usize, 1), hist.count());
+    try testing.expectEqual(@as(u32, 3), hist.get(0).?.frequency);
+}
+
+test "dedup: same command in different cwd creates separate entries" {
+    var hist = History.init(testing.allocator);
+    defer hist.deinit();
+
+    _ = hist.add(.{ .command = "make", .cwd = "/project-a", .exit_status = 0 });
+    _ = hist.add(.{ .command = "make", .cwd = "/project-b", .exit_status = 0 });
 
     try testing.expectEqual(@as(usize, 2), hist.count());
 }
 
-test "history: empty lines ignored" {
-    var hist = History.init(testing.allocator);
-    defer hist.deinit();
+test "scoring: recent beats old at same frequency" {
+    const now = std.time.timestamp();
+    const week_ago = now - 7 * 24 * 60 * 60;
 
-    try testing.expect(!hist.add("")); // Empty - returns false
-    try testing.expect(hist.add("command"));
-    try testing.expect(!hist.add("")); // Empty - returns false
+    const recent: Entry = .{ .command = "a", .cwd = "/", .timestamp = now, .exit_status = 0, .frequency = 1 };
+    const old: Entry = .{ .command = "b", .cwd = "/", .timestamp = week_ago, .exit_status = 0, .frequency = 1 };
 
-    try testing.expectEqual(@as(usize, 1), hist.count());
+    // Pass null for cwd to test eviction-style scoring
+    try testing.expect(scoreEntry(&recent, null, now) > scoreEntry(&old, null, now));
 }
 
-test "history: search finds match" {
-    var hist = History.init(testing.allocator);
-    defer hist.deinit();
+test "scoring: high frequency compensates for age" {
+    const now = std.time.timestamp();
+    const week_ago = now - 7 * 24 * 60 * 60;
 
-    _ = hist.add("echo hello");
-    _ = hist.add("ls -la");
-    _ = hist.add("echo world");
+    const old_frequent: Entry = .{ .command = "a", .cwd = "/", .timestamp = week_ago, .exit_status = 0, .frequency = 100 };
+    const old_rare: Entry = .{ .command = "b", .cwd = "/", .timestamp = week_ago, .exit_status = 0, .frequency = 1 };
 
-    // Search for "echo" finds most recent match (index 2)
-    try testing.expectEqual(@as(?usize, 2), hist.search("echo", null));
-    // Search for "ls" finds index 1
-    try testing.expectEqual(@as(?usize, 1), hist.search("ls", null));
-    // Search for nonexistent returns null
-    try testing.expectEqual(@as(?usize, null), hist.search("git", null));
+    try testing.expect(scoreEntry(&old_frequent, null, now) > scoreEntry(&old_rare, null, now));
 }
 
-test "history: search with start finds earlier match" {
-    var hist = History.init(testing.allocator);
-    defer hist.deinit();
-
-    _ = hist.add("echo first");
-    _ = hist.add("echo second");
-    _ = hist.add("echo third");
-
-    // First search finds index 2
-    try testing.expectEqual(@as(?usize, 2), hist.search("echo", null));
-    // Search starting from 2 finds index 1
-    try testing.expectEqual(@as(?usize, 1), hist.search("echo", 2));
-    // Search starting from 1 finds index 0
-    try testing.expectEqual(@as(?usize, 0), hist.search("echo", 1));
-    // Search starting from 0 finds nothing
-    try testing.expectEqual(@as(?usize, null), hist.search("echo", 0));
+test "scoring: directory relevance" {
+    try testing.expectEqual(@as(f64, 100.0), directoryScore("/home/user", "/home/user"));
+    try testing.expectEqual(@as(f64, 50.0), directoryScore("/home", "/home/user/project"));
+    try testing.expectEqual(@as(f64, 30.0), directoryScore("/home/user/project", "/home/user"));
+    try testing.expectEqual(@as(f64, 20.0), directoryScore("/projects/app-a", "/projects/app-b"));
+    try testing.expectEqual(@as(f64, 0.0), directoryScore("/var/log", "/home/user"));
 }
 
-test "history: search empty query returns null" {
-    var hist = History.init(testing.allocator);
-    defer hist.deinit();
-
-    _ = hist.add("echo hello");
-    try testing.expectEqual(@as(?usize, null), hist.search("", null));
+test "scoring: sibling directory detection" {
+    try testing.expect(areSiblingDirectories("/projects/a", "/projects/b"));
+    try testing.expect(areSiblingDirectories("/home/user/proj1", "/home/user/proj2"));
+    try testing.expect(!areSiblingDirectories("/projects/a", "/other/b"));
+    try testing.expect(!areSiblingDirectories("/", "/home"));
+    try testing.expect(!areSiblingDirectories("/a", "/b")); // both under root, but root is special
 }
 
-test "history: countMatches counts all matching entries" {
-    var hist = History.init(testing.allocator);
-    defer hist.deinit();
-
-    _ = hist.add("echo hello");
-    _ = hist.add("ls -la");
-    _ = hist.add("echo world");
-    _ = hist.add("echo again");
-
-    try testing.expectEqual(@as(usize, 3), hist.countMatches("echo"));
-    try testing.expectEqual(@as(usize, 1), hist.countMatches("ls"));
-    try testing.expectEqual(@as(usize, 0), hist.countMatches("git"));
-    try testing.expectEqual(@as(usize, 0), hist.countMatches(""));
+test "scoring: parent directory extraction" {
+    try testing.expectEqualStrings("/home/user", parentDirectory("/home/user/projects"));
+    try testing.expectEqualStrings("/", parentDirectory("/home"));
+    try testing.expectEqualStrings("", parentDirectory("/"));
+    try testing.expectEqualStrings("/a/b", parentDirectory("/a/b/c/"));
 }
 
-test "history: getMatchPosition returns 1-based position" {
-    var hist = History.init(testing.allocator);
-    defer hist.deinit();
-
-    _ = hist.add("echo first"); // index 0, position 1
-    _ = hist.add("ls -la"); // index 1, not a match
-    _ = hist.add("echo second"); // index 2, position 2
-    _ = hist.add("echo third"); // index 3, position 3
-
-    // Position among "echo" matches
-    try testing.expectEqual(@as(usize, 1), hist.getMatchPosition("echo", 0));
-    try testing.expectEqual(@as(usize, 2), hist.getMatchPosition("echo", 2));
-    try testing.expectEqual(@as(usize, 3), hist.getMatchPosition("echo", 3));
+test "scoring: frequency scoring" {
+    try testing.expectEqual(@as(f64, 0.0), frequencyScore(0));
+    try testing.expectEqual(@as(f64, 20.0), frequencyScore(1));
+    try testing.expectEqual(@as(f64, 40.0), frequencyScore(3));
 }
 
-test "history: file persistence" {
+test "scoring: success scoring" {
+    try testing.expectEqual(@as(f64, 100.0), successScore(0));
+    try testing.expectEqual(@as(f64, 20.0), successScore(1));
+    try testing.expectEqual(@as(f64, 20.0), successScore(127));
+}
+
+test "persistence: save and load preserves entries" {
     var hist = History.init(testing.allocator);
     defer hist.deinit();
 
-    // Create temp file
-    var tmp_dir = testing.tmpDir(.{});
-    defer tmp_dir.cleanup();
+    _ = hist.add(.{ .command = "echo test", .cwd = "/tmp", .exit_status = 0 });
+    _ = hist.add(.{ .command = "ls", .cwd = "/home", .exit_status = 1 });
 
-    const file = try tmp_dir.dir.createFile("history", .{});
-    try file.writeAll("line1\nline2\nline3\n");
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile("history", .{});
     file.close();
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = try tmp.dir.realpath("history", &buf);
 
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const path = try tmp_dir.dir.realpath("history", &path_buf);
-
-    // Load history
-    hist.load(path);
-    try testing.expectEqual(@as(usize, 3), hist.count());
-    try testing.expectEqualStrings("line1", hist.get(0).?);
-
-    // Add and save
-    try testing.expect(hist.add("line4"));
     hist.save(path);
 
-    // Reload and verify
     var hist2 = History.init(testing.allocator);
     defer hist2.deinit();
     hist2.load(path);
 
-    try testing.expectEqual(@as(usize, 4), hist2.count());
-    try testing.expectEqualStrings("line4", hist2.get(3).?);
+    try testing.expectEqual(@as(usize, 2), hist2.count());
+    try testing.expectEqualStrings("echo test", hist2.get(0).?.command);
+    try testing.expectEqualStrings("/tmp", hist2.get(0).?.cwd);
+    try testing.expectEqual(@as(u8, 1), hist2.get(1).?.exit_status);
 }

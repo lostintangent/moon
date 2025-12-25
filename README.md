@@ -5,7 +5,7 @@ A modern shell with a clean syntax and a great developer experience out-of-the-b
 - **Zero-setup REPL** — Syntax highlighting, ghost text, completions, and a beautiful default prompt.
 - **Clean syntax** — Familiar control flow with script-friendly ergonomics, plus [`defer`](#defer) for automatic cleanup.
 - **Lists by default** — Variables, [globs](#glob-patterns), and [brace expansion](#brace-expansion) all produce lists, which can be enumerated, indexed, or sliced.
-- **Modern builtins** — [Colored output](#colored-output-with-print), [output capture](#output-capture), [`math`](#math-expressions), [`path_prepend`](#path_prepend), and more!
+- **Modern builtins** — [Colored output](#colored-output-with-print), [output capture](#output-capture), [arithmetic (`calc`/`=`)](#calc-expressions), [`increment`](#increment), [`path_prepend`](#path_prepend), and more!
 
 ---
 
@@ -77,7 +77,7 @@ oshen script.wave
 ### Control Flow
 
 - [If Statements](#if-statements)
-- [For Loops](#for-loops)
+- [Each Loops](#each-loops)
 - [While Loops](#while-loops)
 - [Conditional Chaining](#conditional-chaining)
 - [Functions](#functions)
@@ -110,10 +110,10 @@ Commands, strings, operators, and variables are color-coded as you type:
 
 - **Commands** — Valid commands (builtins, functions, aliases, and executables) shown in bold
 - **Invalid commands** — Unknown commands shown in red
+- **Keywords** — Control flow (`if`, `for`, `while`, etc.) in blue
 - **Strings** — Single and double-quoted strings in green
-- **Variables** — `$var` expansions highlighted distinctly
+- **Variables** — `$var` expansions highlighted in purple
 - **Operators** — Pipes, redirections, and logical operators in cyan
-- **Comments** — Dimmed gray
 
 Highlighting updates in real-time as you edit, giving instant feedback on syntax errors.
 
@@ -130,7 +130,13 @@ $ git commit -m "Update docs"       # Suggestion appears dimmed
 - Press **Alt+→** to accept word-by-word
 - Continue typing to refine or ignore
 
-Suggestions match against your history, preferring recent and frequently-used commands.
+Suggestions are **context-aware**, scored by:
+- **Directory** — Commands from your current directory rank highest
+- **Recency** — Recent commands rank higher (exponential decay)
+- **Frequency** — Frequently-used commands rank higher
+- **Success** — Successful commands get a small bonus over failures
+
+This means `cd src` in project A suggests differently than in project B.
 
 ## Tab Completion
 
@@ -183,31 +189,18 @@ Oshen provides Emacs-style line editing keybindings:
 
 ## History
 
-Command history is automatically saved to `~/.oshen_log` and persists across sessions.
+Command history is automatically saved to `~/.oshen_history` and persists across sessions.
 
 | Key | Action |
 |-----|--------|
 | **↑** / **Ctrl+P** | Previous command in history |
 | **↓** / **Ctrl+N** | Next command in history |
-| **Ctrl+R** | Reverse incremental search |
-
-### History Search
-
-Press **Ctrl+R** to search your command history as you type:
-
-```shell
-(reverse-i-search)`git': git commit -m "Update docs"
-```
-
-- Type to filter history entries
-- Press **Ctrl+R** again to find the next match
-- Press **Enter** to execute the matched command
-- Press **Esc** or **Ctrl+G** to cancel
 
 History features:
-- Commands are saved as you enter them
-- Duplicate consecutive commands are not added
-- History file is loaded on startup and saved on exit
+- **10,000 entries** — Retains months of usage
+- **Context-aware** — Each command records the working directory, timestamp, and exit status
+- **Frequency tracking** — Same command in the same directory increments frequency (no duplicates)
+- **Binary format** — Fast load/save with `~/.oshen_history`
 
 ## Configuration
 
@@ -548,24 +541,52 @@ Only the first matching branch executes. The final `else` is optional.
 
 ---
 
-## For Loops
+## Each Loops
 
-Iterate over items:
+The `each` statement iterates over items, providing automatic `$item` and `$index` variables:
 
 ```sh
-for file in *.txt
-    print "Processing $file"
+# Simple form - items available as $item, index as $index
+each *.txt
+    print "[$index] Processing $item"
+end
+
+# Named form - custom variable name
+each file in *.txt
+    print "Processing $file (index: $index)"
 end
 
 # Loop over a variable list
 var names Alice Bob Carol
-for name in $names
+each name in $names
     print "Hello, $name"
 end
 
 # Inline form
-for x in a b c; print $x; end
+each a b c; print $item; end
 ```
+
+### The `for` Keyword
+
+The `for` keyword is an alias for `each` with identical behavior:
+
+```sh
+# These are equivalent:
+each x in a b c
+    print $x
+end
+
+for x in a b c
+    print $x
+end
+
+# for also supports implicit $item and $index:
+for *.txt
+    print "[$index] $item"
+end
+```
+
+Use `each` as the primary syntax—`for` is provided for familiarity with other shells.
 
 ---
 
@@ -577,7 +598,7 @@ Repeat while a condition is true:
 var count 5
 while test $count -gt 0
     print "Countdown: $count"
-    var count (math $count - 1)
+    var count (= $count - 1)
 end
 
 # Wait for a file to appear
@@ -626,7 +647,7 @@ end
 # Output: 1 2 4 5
 ```
 
-Both `break` and `continue` work in `for` and `while` loops.
+Both `break` and `continue` work in `each` and `while` loops.
 
 ---
 
@@ -995,7 +1016,8 @@ Both syntaxes work—choose based on readability preference!
 | `pwd [-t]` | Print working directory (`-t`: replace $HOME with ~) |
 | `var` / `set `[name [values...]]` | Get/set shell variables |
 | `source <file>` | Execute file in current shell |
-| `math <expr>` | Evaluate arithmetic expression (+ - * / %) |
+| `calc <expr>` / `= <expr>` | Evaluate arithmetic expression (+ - x * / %) |
+| `increment <var> [--by <n>]` | Increment variable by n (default: 1) |
 | `test <expr>` / `[ <expr> ]` | Evaluate conditional expression |
 | `true` | Return success (exit 0) |
 | `type <name>...` | Show how a name resolves (alias/builtin/function/external) |
@@ -1050,73 +1072,121 @@ var count 5
 if [ $count -gt 0 ]; print "count is positive"; end
 ```
 
-### Math Expressions
+### Numeric Operations
 
-The `math` builtin evaluates arithmetic expressions:
+#### Arithmetic with `calc` / `=`
 
-```sh
-math 2 + 3                       # 5
-math 10 - 3                      # 7
-math 20 / 4                      # 5 (integer division)
-math 17 % 5                      # 2 (modulo)
-```
-
-#### Quoting and Escaping
-
-Since `*` triggers glob expansion and `(` triggers command substitution, you need to quote or escape them:
+The `calc` builtin (or its expressive `=` alias) evaluates arithmetic expressions:
 
 ```sh
-# Quote the expression (recommended for complex expressions)
-math "4 * 5"                     # 20
-math "(2 + 3) * 4"               # 20
-
-# Or escape individual characters
-math 4 \* 5                      # 20
-math \(2 + 3\) \* 4              # 20
+= 2 + 3                          # 5
+calc 10 - 3                      # 7
+= 20 / 4                         # 5 (integer division)
+= 17 % 5                         # 2 (modulo)
+= 4 x 5                          # 20 (x as multiplication - no quoting needed!)
 ```
 
-#### Operator Precedence
+The `=` alias reads naturally: `var sum (= $a + $b)` → "sum equals a plus b"
 
-Multiplication, division, and modulo bind tighter than addition/subtraction:
+#### Multiplication with `x` or `*`
+
+For multiplication, use `x` (no quoting needed) or `*` (requires quoting):
 
 ```sh
-math "2 + 3 * 4"                 # 14 (not 20)
-math "(2 + 3) * 4"               # 20 (parens override)
+# Use x - clean and simple (recommended)
+= 4 x 5                          # 20
+= 2 x 3 x 4                      # 24
+
+# Or quote * if you prefer the traditional operator
+= "4 * 5"                        # 20
+= "(2 + 3) * 4"                  # 20
 ```
 
-#### With Variables and Loops
+The `x` operator reads naturally: "4 times 5"
 
-Combine with bare paren capture for clean arithmetic:
+**Quoting Parentheses**
+
+Since `(` triggers command substitution, quote complex expressions with parentheses:
+
+```sh
+= "(2 + 3) x 4"                  # 20 (parentheses for grouping)
+= "((2 + 3) x 2) + 1"            # 11 (nested parentheses)
+```
+
+**Operator Precedence**
+
+Multiplication (both `x` and `*`), division, and modulo bind tighter than addition/subtraction:
+
+```sh
+= 2 + 3 x 4                      # 14 (not 20)
+= "(2 + 3) x 4"                  # 20 (parens override)
+```
+
+**With Variables and Loops**
 
 ```sh
 var x 5
-var y (math $x + 3)              # y = 8
+var y (= $x + 3)                 # y = 8
 
 # Countdown loop
 var count 5
 while test $count -gt 0
     print "Countdown: $count"
-    var count (math $count - 1)
+    var count (= $count - 1)
 end
 
 # Sum a list
 var sum 0
 for i in 1 2 3 4 5
-    var sum (math $sum + $i)
+    var sum (= $sum + $i)
 end
 print "Sum: $sum"                # Sum: 15
 ```
 
-#### Supported Operators
+**Supported Operators**
 
 | Operator | Description |
 |----------|-------------|
 | `+` | Addition |
 | `-` | Subtraction (also unary minus) |
-| `*` | Multiplication |
+| `x` | Multiplication (no quoting needed) |
+| `*` | Multiplication (requires quoting) |
 | `/` | Integer division |
 | `%` | Modulo |
-| `()` | Grouping |
+| `()` | Grouping (requires quoting) |
+
+#### Incrementing with `increment`
+
+The `increment` builtin provides a clean way to increment (or decrement) numeric variables:
+
+```sh
+var count 0
+increment count                  # count = 1
+increment count                  # count = 2
+increment count --by 5           # count = 7
+increment count --by -3          # count = 4 (decrement)
+```
+
+This is much cleaner than `var count (= $count + 1)` for the common case of incrementing counters, especially in loops and test frameworks.
+
+**Syntax:**
+- `increment <var>` — Increment by 1 (default)
+- `increment <var> --by <n>` — Increment by n (can be negative for decrement)
+
+**Examples:**
+```sh
+# Test counter
+var PASS 0
+increment PASS                   # PASS = 1
+
+# Custom increment
+var score 100
+increment score --by 50          # score = 150
+
+# Decrement
+var lives 3
+increment lives --by -1          # lives = 2
+```
 
 ---
 

@@ -3,7 +3,7 @@
 //! The parser recognizes Oshen's grammar:
 //! - Commands with arguments, redirections, and environment prefixes
 //! - Pipelines (`cmd1 | cmd2`) and logical chains (`&&`, `||`, `and`, `or`)
-//! - Control flow: `if`/`else`, `for`/`in`, `while`, `break`, `continue`
+//! - Control flow: `if`/`else`, `for`/`in`, `each`, `while`, `break`, `continue`
 //! - Function definitions (`fun name ... end`)
 //! - Output capture (`=> var`, `=>@ var`)
 //! - Background execution (`&`)
@@ -26,7 +26,7 @@ const CommandStatement = ast.CommandStatement;
 const FunctionDefinition = ast.FunctionDefinition;
 const IfStatement = ast.IfStatement;
 const IfBranch = ast.IfBranch;
-const ForStatement = ast.ForStatement;
+const EachStatement = ast.EachStatement;
 const WhileStatement = ast.WhileStatement;
 const ChainItem = ast.ChainItem;
 const Pipeline = ast.Pipeline;
@@ -45,8 +45,8 @@ pub const ParseError = error{
     InvalidFunctionName,
     UnterminatedFunction,
     UnterminatedIf,
-    InvalidForLoop,
-    UnterminatedFor,
+    InvalidEach,
+    UnterminatedEach,
     UnterminatedWhile,
     OutOfMemory,
 };
@@ -138,14 +138,24 @@ pub const Parser = struct {
         return parts.len == 1 and parts[0].quotes == .none and token_types.isLogicalOperator(parts[0].text);
     }
 
-    /// Returns true if current token starts a block (if, for, while, fun).
+    /// Returns true if current token starts a block (if, for, each, while, fun).
     fn isBlockStart(self: *const Parser) bool {
-        return self.isOp("if") or self.isOp("for") or self.isOp("while") or self.isOp("fun");
+        return self.isOp("if") or self.isOp("for") or self.isOp("each") or self.isOp("while") or self.isOp("fun");
     }
 
     // =========================================================================
     // Word analysis helpers
     // =========================================================================
+
+    /// Extracts a simple unquoted word's text from a token.
+    /// Returns null if the token is not a single unquoted word segment.
+    fn extractSimpleWord(tok: Token) ?[]const u8 {
+        const segs = tok.kind.word;
+        if (segs.len == 1 and segs[0].quotes == .none) {
+            return segs[0].text;
+        }
+        return null;
+    }
 
     /// Result of parsing an environment variable assignment.
     const EnvAssignment = struct { key: []const u8, value: []const u8 };
@@ -515,35 +525,42 @@ pub const Parser = struct {
         return IfBranch{ .condition = condition, .body = body };
     }
 
-    /// Parses a for loop: `for var in items... end`
-    fn parseForStatement(self: *Parser) ParseError!Statement {
-        _ = self.advance(); // consume 'for'
+    /// Parses an each loop (for is an alias).
+    ///
+    /// Supported forms:
+    ///   - `each items... end`         (variable defaults to "item")
+    ///   - `each var in items... end`  (explicit variable name)
+    ///   - `for var in items... end`   (alias)
+    ///   - `for items... end`          (alias)
+    ///
+    /// Sets $item (or custom var) and $index (1-based) on each iteration.
+    fn parseEachStatement(self: *Parser) ParseError!Statement {
+        _ = self.advance(); // consume 'each' or 'for'
         self.skipSeparators();
 
-        // Parse variable name
-        if (!self.isWord()) return ParseError.InvalidForLoop;
-        const var_tok = self.advance().?;
-        const variable = blk: {
-            const segs = var_tok.kind.word;
-            if (segs.len == 1 and segs[0].quotes == .none) {
-                break :blk segs[0].text;
-            }
-            return ParseError.InvalidForLoop;
+        if (!self.isWord()) return ParseError.InvalidEach;
+
+        // Look ahead: is this `VAR in ITEMS` or just `ITEMS`?
+        const first_word_pos = self.pos;
+        const first_word_tok = self.advance().?;
+        self.skipSeparators();
+
+        const variable: []const u8 = if (self.isOp("in")) blk: {
+            // `var in items` form - extract variable name
+            _ = self.advance(); // consume 'in'
+            self.skipSeparators();
+            break :blk extractSimpleWord(first_word_tok) orelse return ParseError.InvalidEach;
+        } else blk: {
+            // `items` form - rewind and use default variable name
+            self.pos = first_word_pos;
+            break :blk "item";
         };
 
-        self.skipSeparators();
-
-        // Expect 'in' keyword
-        if (!self.isOp("in")) return ParseError.InvalidForLoop;
-        _ = self.advance(); // consume 'in'
-        self.skipSeparators();
-
-        // Items: everything until separator (newline or semicolon)
         const items_source = self.captureCondition(&.{"end"});
-        const body = try self.captureBlockBody(&.{}, ParseError.UnterminatedFor);
+        const body = try self.captureBlockBody(&.{}, ParseError.UnterminatedEach);
         _ = self.advance(); // consume 'end'
 
-        return Statement{ .kind = .{ .@"for" = ForStatement{
+        return Statement{ .kind = .{ .each = EachStatement{
             .variable = variable,
             .items_source = items_source,
             .body = body,
@@ -574,7 +591,7 @@ pub const Parser = struct {
         // Control flow and function definitions
         if (self.isOp("fun")) return try self.parseFunctionDefinition();
         if (self.isOp("if")) return try self.parseIfStatement();
-        if (self.isOp("for")) return try self.parseForStatement();
+        if (self.isOp("each") or self.isOp("for")) return try self.parseEachStatement();
         if (self.isOp("while")) return try self.parseWhileStatement();
 
         // Simple statements
@@ -1196,4 +1213,97 @@ test "Defer: in function" {
     const fun_def = prog.statements[0].kind.function;
     try testing.expectEqualStrings("cleanup", fun_def.name);
     try testing.expect(std.mem.indexOf(u8, fun_def.body, "defer echo done") != null);
+}
+
+// =============================================================================
+// Each loop tests
+// =============================================================================
+
+test "Each: basic with implicit item" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    const input = "each a b c\n  echo $item\nend";
+    const prog = try parseTest(&arena, input);
+
+    try testing.expectEqual(@as(usize, 1), prog.statements.len);
+    const each_stmt = prog.statements[0].kind.each;
+    try testing.expectEqualStrings("item", each_stmt.variable);
+    try testing.expectEqualStrings("a b c", each_stmt.items_source);
+    try testing.expect(std.mem.indexOf(u8, each_stmt.body, "echo $item") != null);
+}
+
+test "Each: with explicit variable" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    const input = "each x in 1 2 3\n  echo $x\nend";
+    const prog = try parseTest(&arena, input);
+
+    try testing.expectEqual(@as(usize, 1), prog.statements.len);
+    const each_stmt = prog.statements[0].kind.each;
+    try testing.expectEqualStrings("x", each_stmt.variable);
+    try testing.expectEqualStrings("1 2 3", each_stmt.items_source);
+}
+
+test "Each: inline statement" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    const input = "each a b c; echo $item; end";
+    const prog = try parseTest(&arena, input);
+
+    try testing.expectEqual(@as(usize, 1), prog.statements.len);
+    const each_stmt = prog.statements[0].kind.each;
+    try testing.expectEqualStrings("item", each_stmt.variable);
+}
+
+test "Each: for keyword alias with implicit item" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    const input = "for a b c\n  echo $item\nend";
+    const prog = try parseTest(&arena, input);
+
+    try testing.expectEqual(@as(usize, 1), prog.statements.len);
+    const each_stmt = prog.statements[0].kind.each;
+    try testing.expectEqualStrings("item", each_stmt.variable);
+    try testing.expectEqualStrings("a b c", each_stmt.items_source);
+}
+
+test "Each: for keyword alias with explicit variable" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    const input = "for x in 1 2 3\n  echo $x\nend";
+    const prog = try parseTest(&arena, input);
+
+    try testing.expectEqual(@as(usize, 1), prog.statements.len);
+    const each_stmt = prog.statements[0].kind.each;
+    try testing.expectEqualStrings("x", each_stmt.variable);
+    try testing.expectEqualStrings("1 2 3", each_stmt.items_source);
+}
+
+test "Each: nested" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    const input = "each a b\n  each 1 2\n    echo $item\n  end\nend";
+    const prog = try parseTest(&arena, input);
+
+    try testing.expectEqual(@as(usize, 1), prog.statements.len);
+    const each_stmt = prog.statements[0].kind.each;
+    try testing.expect(std.mem.indexOf(u8, each_stmt.body, "each 1 2") != null);
+}
+
+test "Each: unterminated error" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    const input = "each a b c\n  echo $item";
+    var lex = lexer.Lexer.init(arena.allocator(), input);
+    const tokens = try lex.tokenize();
+    var p = Parser.initWithInput(arena.allocator(), tokens, input);
+
+    try testing.expectError(ParseError.UnterminatedEach, p.parse());
 }

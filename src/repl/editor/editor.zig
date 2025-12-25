@@ -3,7 +3,7 @@
 //! Provides a readline-like editing experience with:
 //! - Cursor movement (arrows, Home/End, word-by-word with Ctrl+arrows)
 //! - Text manipulation (insert, delete, kill word/line)
-//! - History navigation (up/down arrows, Ctrl+R reverse search)
+//! - History navigation (up/down arrows)
 //! - Syntax highlighting (via highlight.zig)
 //! - Autosuggestions from history (via suggest.zig)
 //! - Tab completion (via complete.zig)
@@ -79,12 +79,6 @@ pub const Editor = struct {
     suggestions: bool,
     /// Shell state (for alias checking in highlighting)
     state: ?*State,
-    /// Search mode active
-    search_mode: bool,
-    /// Search query buffer
-    search_query: std.ArrayListUnmanaged(u8),
-    /// Index of current search match in history
-    search_match_index: ?usize,
     /// Whether the terminal currently has focus (controls redraw and suggestions)
     has_focus: bool,
     /// Whether the display has been initialized (safe to render). Currently driven
@@ -105,9 +99,6 @@ pub const Editor = struct {
             .highlighting = true,
             .suggestions = true,
             .state = null,
-            .search_mode = false,
-            .search_query = .empty,
-            .search_match_index = null,
             .has_focus = false,
             .display_initialized = false,
         };
@@ -117,7 +108,6 @@ pub const Editor = struct {
         self.restoreTerminal();
         self.buf.deinit(self.allocator);
         self.hist.deinit();
-        self.search_query.deinit(self.allocator);
         if (self.saved_line) |line| {
             self.allocator.free(line);
         }
@@ -172,29 +162,14 @@ pub const Editor = struct {
         while (true) {
             const key = try tui.readKey(self.tty_fd);
 
-            // Handle search mode - returns true if key was consumed
-            if (self.search_mode and try self.handleSearchKey(key)) {
-                continue;
-            }
-
             switch (key) {
-                .search => {
-                    self.search_mode = true;
-                    self.search_query.clearRetainingCapacity();
-                    self.search_match_index = null;
-                    try self.refreshSearch();
-                },
                 .enter => {
                     // Clear suggestion text before newline by rewriting line without suggestion
                     try writeToTerminal("\r\x1b[K");
                     try writeToTerminal(self.prompt);
                     try writeToTerminal(self.buf.items);
                     try writeToTerminal("\r\n");
-                    const line = try self.allocator.dupe(u8, self.buf.items);
-                    if (line.len > 0) {
-                        _ = self.hist.add(line);
-                    }
-                    return line;
+                    return try self.allocator.dupe(u8, self.buf.items);
                 },
                 .eof => {
                     if (self.buf.items.len == 0) {
@@ -242,43 +217,6 @@ pub const Editor = struct {
                 },
                 else => {},
             }
-        }
-    }
-
-    /// Handle key input while in search mode.
-    /// Returns true if the key was consumed (caller should continue to next key).
-    /// Returns false if the key should be processed by normal key handling.
-    fn handleSearchKey(self: *Editor, key: tui.Key) !bool {
-        switch (key) {
-            .search => {
-                // Ctrl+R again = find next match
-                self.performSearch(true);
-                try self.refreshSearch();
-                return true;
-            },
-            .backspace => {
-                if (self.search_query.items.len > 0) {
-                    _ = self.search_query.pop();
-                    self.performSearch(false);
-                    try self.refreshSearch();
-                }
-                return true;
-            },
-            .char => |c| {
-                try self.search_query.append(self.allocator, c);
-                self.performSearch(false);
-                try self.refreshSearch();
-                return true;
-            },
-            else => {
-                // Exit search mode, accept match, then let caller process the key
-                self.search_mode = false;
-                if (self.search_match_index) |idx| {
-                    try self.setLineContent(self.hist.entries.items[idx]);
-                }
-                try self.refreshLine();
-                return false;
-            },
         }
     }
 
@@ -395,7 +333,7 @@ pub const Editor = struct {
 
         if (self.hist_index.? > 0) {
             self.hist_index.? -= 1;
-            try self.setLineContent(self.hist.entries.items[self.hist_index.?]);
+            try self.setLineContent(self.hist.entries.items[self.hist_index.?].command);
             try self.refreshLine();
         }
     }
@@ -406,7 +344,7 @@ pub const Editor = struct {
 
         if (self.hist_index.? < self.hist.entries.items.len - 1) {
             self.hist_index.? += 1;
-            try self.setLineContent(self.hist.entries.items[self.hist_index.?]);
+            try self.setLineContent(self.hist.entries.items[self.hist_index.?].command);
         } else {
             self.hist_index = null;
             if (self.saved_line) |saved| {
@@ -421,34 +359,6 @@ pub const Editor = struct {
         try self.refreshLine();
     }
 
-    /// Perform history search
-    fn performSearch(self: *Editor, next: bool) void {
-        const start = if (next) self.search_match_index else null;
-        self.search_match_index = self.hist.search(self.search_query.items, start);
-    }
-
-    /// Refresh search UI
-    fn refreshSearch(self: *Editor) !void {
-        var out_buf: [4096]u8 = undefined;
-        var stream = std.io.fixedBufferStream(&out_buf);
-        const writer = stream.writer();
-
-        try writer.writeAll("\r\x1b[K");
-        try writer.print(ansi.magenta ++ "Search history: " ++ ansi.reset ++ "{s} ", .{self.search_query.items});
-
-        if (self.search_match_index) |idx| {
-            const total = self.hist.countMatches(self.search_query.items);
-            const pos = self.hist.getMatchPosition(self.search_query.items, idx);
-            try writer.print(ansi.dim ++ "({d} of {d}) " ++ ansi.reset, .{ pos, total });
-            const match = self.hist.entries.items[idx];
-            try writer.writeAll(match);
-        } else if (self.search_query.items.len > 0) {
-            try writer.writeAll(ansi.dim ++ "No results found" ++ ansi.reset);
-        }
-
-        try writeToTerminal(stream.getWritten());
-    }
-
     /// Set line content from history
     fn setLineContent(self: *Editor, content: []const u8) !void {
         self.buf.clearRetainingCapacity();
@@ -461,11 +371,6 @@ pub const Editor = struct {
         // Skip redraws until display is initialized (terminal visible and sized).
         // Once initialized, refresh even when unfocused to support programmatic PTY input.
         if (!self.has_focus and !self.display_initialized) return;
-
-        if (self.search_mode) {
-            try self.refreshSearch();
-            return;
-        }
 
         var out_buf: [4096]u8 = undefined;
         var stream = std.io.fixedBufferStream(&out_buf);
@@ -487,7 +392,8 @@ pub const Editor = struct {
 
         // Write suggestion suffix (dimmed) if cursor is at end and focused
         if (self.suggestions and self.has_focus and self.cursor == self.buf.items.len) {
-            if (suggest.fromHistory(self.buf.items, &self.hist)) |suffix| {
+            const cwd = if (self.state) |s| s.getCwd() catch "" else "";
+            if (suggest.fromHistory(self.buf.items, &self.hist, cwd)) |suffix| {
                 // Truncate suggestion to fit terminal width
                 const display_suffix = if (getTerminalWidth()) |term_width| blk: {
                     const used = ansi.displayLength(self.prompt) + self.buf.items.len;
@@ -527,7 +433,8 @@ pub const Editor = struct {
     /// Try to accept the current suggestion. Returns true if accepted.
     fn tryAcceptSuggestion(self: *Editor) !bool {
         if (!self.suggestions or self.cursor != self.buf.items.len) return false;
-        if (suggest.fromHistory(self.buf.items, &self.hist)) |suffix| {
+        const cwd = if (self.state) |s| s.getCwd() catch "" else "";
+        if (suggest.fromHistory(self.buf.items, &self.hist, cwd)) |suffix| {
             try self.buf.appendSlice(self.allocator, suffix);
             self.cursor = self.buf.items.len;
             try self.refreshLine();
@@ -652,9 +559,6 @@ pub const Editor = struct {
             .highlighting = false,
             .suggestions = false,
             .state = null,
-            .search_mode = false,
-            .search_query = .{},
-            .search_match_index = null,
             .has_focus = true,
             .display_initialized = true,
         };

@@ -28,7 +28,6 @@ pub const Key = union(enum) {
     kill_word, // ctrl+w
     clear_screen, // ctrl+l
     interrupt, // ctrl+c
-    search, // ctrl+r
     focus_in, // terminal gained focus
     focus_out, // terminal lost focus
     escape,
@@ -132,7 +131,6 @@ pub fn readKey(fd: posix.fd_t) !Key {
             12 => .clear_screen, // ctrl+l
             14 => .{ .ctrl = 'n' }, // ctrl+n (down in some terminals)
             16 => .{ .ctrl = 'p' }, // ctrl+p (up in some terminals)
-            18 => .search, // ctrl+r
             21 => .{ .ctrl = 'u' }, // ctrl+u
             23 => .kill_word, // ctrl+w
             27 => readEscapeSequence(fd), // escape

@@ -1,26 +1,33 @@
-//! math builtin - evaluate arithmetic expressions
+//! calc builtin - evaluate arithmetic expressions
 //!
 //! Supports: + - * / % with proper precedence, parentheses for grouping.
+//! For multiplication, use either * (requires quoting) or x (no quoting needed).
 //!
 //! Examples:
-//!   math 2 + 3           → 5
-//!   math 2 + 3 * 4       → 14 (precedence)
-//!   math "(2 + 3) * 4"   → 20 (parens)
-//!   math $x + 1          → variable + 1
+//!   calc 2 + 3           → 5
+//!   = 2 + 3 x 4          → 14 (precedence, x for multiplication)
+//!   = "(2 + 3) * 4"      → 20 (parens, quoted *)
+//!   = $x + 1             → variable + 1
 
 const std = @import("std");
 const builtins = @import("../builtins.zig");
 
 pub const builtin = builtins.Builtin{
-    .name = "math",
+    .name = "calc",
     .run = run,
-    .help = "math <expression> - Evaluate arithmetic expression (+ - * / %)",
+    .help = "calc <expression> - Evaluate arithmetic expression (+ - x * / %)",
+};
+
+pub const equals_builtin = builtins.Builtin{
+    .name = "=",
+    .run = run,
+    .help = "= <expression> - Evaluate arithmetic expression (+ - x * / %) (alias for calc)",
 };
 
 fn run(_: *builtins.State, cmd: builtins.ExpandedCmd) u8 {
     const args = cmd.argv[1..];
     if (args.len == 0) {
-        builtins.io.writeStderr("math: missing expression\n");
+        builtins.io.printError("{s}: missing expression\n", .{cmd.argv[0]});
         return 1;
     }
 
@@ -36,9 +43,7 @@ fn run(_: *builtins.State, cmd: builtins.ExpandedCmd) u8 {
     // Parse and evaluate
     var parser = Parser.init(expr);
     const result = parser.parse() catch |err| {
-        builtins.io.writeStderr("math: ");
-        builtins.io.writeStderr(errorMessage(err));
-        builtins.io.writeStderr("\n");
+        builtins.io.printError("{s}: {s}\n", .{ cmd.argv[0], errorMessage(err) });
         return 1;
     };
 
@@ -65,8 +70,10 @@ fn errorMessage(err: ParseError) []const u8 {
 //
 // Grammar:
 //   expr   → term (('+' | '-') term)*
-//   term   → factor (('*' | '/' | '%') factor)*
+//   term   → factor (('*' | 'x' | '/' | '%') factor)*
 //   factor → NUMBER | '(' expr ')' | '-' factor
+//
+// The 'x' operator is a shell-friendly alias for '*' (avoids glob expansion).
 
 const ParseError = error{
     DivisionByZero,
@@ -114,11 +121,21 @@ const Parser = struct {
         while (true) {
             self.skipWhitespace();
             const op = self.peek() orelse break;
-            if (op != '*' and op != '/' and op != '%') break;
+
+            // 'x' is multiplication only if followed by whitespace/digit/paren (not part of word)
+            if (op == 'x') {
+                const next = if (self.pos + 1 < self.input.len) self.input[self.pos + 1] else 0;
+                if (next != ' ' and next != 0 and !std.ascii.isDigit(next) and next != '(' and next != '-') {
+                    break; // Not a standalone 'x', treat as end of expression
+                }
+            }
+
+            if (op != '*' and op != 'x' and op != '/' and op != '%') break;
+
             self.advance();
             const right = try self.factor();
             left = switch (op) {
-                '*' => std.math.mul(i64, left, right) catch return error.Overflow,
+                '*', 'x' => std.math.mul(i64, left, right) catch return error.Overflow,
                 '/' => if (right == 0) return error.DivisionByZero else @divTrunc(left, right),
                 '%' => if (right == 0) return error.DivisionByZero else @mod(left, right),
                 else => unreachable,
@@ -181,36 +198,63 @@ fn eval(input: []const u8) ParseError!i64 {
     return p.parse();
 }
 
-test "basic operations" {
+test "ops: basic arithmetic" {
     try testing.expectEqual(@as(i64, 5), try eval("2 + 3"));
     try testing.expectEqual(@as(i64, 7), try eval("10 - 3"));
     try testing.expectEqual(@as(i64, 20), try eval("4 * 5"));
+    try testing.expectEqual(@as(i64, 20), try eval("4 x 5")); // x as multiplication
     try testing.expectEqual(@as(i64, 5), try eval("20 / 4"));
     try testing.expectEqual(@as(i64, 2), try eval("17 % 5"));
 }
 
-test "operator precedence" {
+test "ops: precedence" {
     try testing.expectEqual(@as(i64, 14), try eval("2 + 3 * 4"));
+    try testing.expectEqual(@as(i64, 14), try eval("2 + 3 x 4")); // x has same precedence
     try testing.expectEqual(@as(i64, 4), try eval("10 - 2 * 3"));
+    try testing.expectEqual(@as(i64, 4), try eval("10 - 2 x 3"));
 }
 
-test "parentheses" {
+test "ops: parentheses" {
     try testing.expectEqual(@as(i64, 20), try eval("(2 + 3) * 4"));
+    try testing.expectEqual(@as(i64, 20), try eval("(2 + 3) x 4")); // x with parens
     try testing.expectEqual(@as(i64, 5), try eval("((2 + 3))"));
 }
 
-test "unary minus" {
+test "ops: x multiplication" {
+    try testing.expectEqual(@as(i64, 6), try eval("2 x 3"));
+    try testing.expectEqual(@as(i64, 24), try eval("2 x 3 x 4"));
+    try testing.expectEqual(@as(i64, 50), try eval("10 x 5"));
+    try testing.expectEqual(@as(i64, 0), try eval("0 x 100"));
+    // x followed by digit (no space) should still work
+    try testing.expectEqual(@as(i64, 6), try eval("2 x3"));
+    try testing.expectEqual(@as(i64, 6), try eval("2x 3"));
+    try testing.expectEqual(@as(i64, 6), try eval("2x3"));
+}
+
+test "ops: unary minus" {
     try testing.expectEqual(@as(i64, -5), try eval("-5"));
     try testing.expectEqual(@as(i64, 5), try eval("--5"));
     try testing.expectEqual(@as(i64, 1), try eval("3 + -2"));
+    try testing.expectEqual(@as(i64, -6), try eval("-2 x 3"));
+    try testing.expectEqual(@as(i64, -6), try eval("2 x -3"));
 }
 
-test "division by zero" {
+test "ops: whitespace handling" {
+    try testing.expectEqual(@as(i64, 5), try eval("  2 + 3  "));
+    try testing.expectEqual(@as(i64, 5), try eval("2+3"));
+    try testing.expectEqual(@as(i64, 14), try eval("2+3*4"));
+}
+
+test "error: division by zero" {
     try testing.expectError(error.DivisionByZero, eval("5 / 0"));
     try testing.expectError(error.DivisionByZero, eval("5 % 0"));
 }
 
-test "invalid input" {
+test "error: invalid input" {
     try testing.expectError(error.InvalidNumber, eval("+ 5"));
     try testing.expectError(error.UnmatchedParen, eval("(2 + 3"));
+    try testing.expectError(error.InvalidNumber, eval("2 + 3 abc")); // trailing garbage
+    try testing.expectError(error.UnexpectedEnd, eval("")); // empty
+    try testing.expectError(error.UnexpectedEnd, eval("   ")); // whitespace only
+    try testing.expectError(error.UnmatchedParen, eval(")"));
 }

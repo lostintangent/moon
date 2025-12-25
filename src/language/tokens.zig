@@ -142,7 +142,7 @@ fn stringSet(comptime strings: []const []const u8) std.StaticStringMap(void) {
     }
 }
 
-const keywords = stringSet(&.{ "and", "or", "fun", "end", "if", "else", "for", "in", "while", "break", "continue", "return", "defer" });
+const keywords = stringSet(&.{ "and", "or", "fun", "end", "if", "else", "for", "each", "in", "while", "break", "continue", "return", "defer" });
 pub fn isKeyword(word: []const u8) bool {
     return keywords.has(word);
 }
@@ -189,6 +189,21 @@ pub fn isValidIdentifier(text: []const u8) bool {
     if (!isIdentStart(text[0])) return false;
     for (text[1..]) |c| {
         if (!isIdentChar(c)) return false;
+    }
+    return true;
+}
+
+/// Returns true if text is a variable reference ($identifier or $N).
+pub fn isVariable(text: []const u8) bool {
+    if (text.len < 2 or text[0] != '$') return false;
+    const name = text[1..];
+
+    // Named variable ($foo, $HOME)
+    if (isValidIdentifier(name)) return true;
+
+    // Positional ($1, $2, etc.)
+    for (name) |c| {
+        if (!std.ascii.isDigit(c)) return false;
     }
     return true;
 }

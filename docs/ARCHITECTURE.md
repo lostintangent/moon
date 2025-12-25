@@ -178,9 +178,9 @@ The REPL provides the interactive shell experience.
 | `repl.zig` | Main read-eval-print loop |
 | `prompt.zig` | Prompt generation (default or custom function) |
 | `editor/editor.zig` | Line editing, cursor movement, key handling |
-| `editor/history.zig` | Command history with file persistence |
+| `editor/history.zig` | Command history with rich metadata (CWD, timestamp, frequency) |
 | `editor/highlight.zig` | Real-time syntax highlighting |
-| `editor/suggest.zig` | Autosuggestions from history |
+| `editor/suggest.zig` | Context-aware autosuggestions with weighted scoring |
 
 **REPL loop:**
 ```zig
@@ -197,10 +197,10 @@ while (true) {
 | Feature | Implementation |
 |---------|----------------|
 | Syntax highlighting | Real-time coloring as you type |
-| Autosuggestions | Dimmed history completions |
-| History search | `Ctrl+R` reverse incremental search |
+| Autosuggestions | Context-aware scoring: directory (40%) + recency (30%) + frequency (25%) + success (5%) |
 | Custom prompt | User-defined `prompt` function (stdout captured) |
 | Line editing | Emacs-style keybindings |
+| History storage | Binary format with 10K entries, tracking CWD/timestamp/exit status per command |
 
 ### 5. Terminal (`src/terminal/`)
 

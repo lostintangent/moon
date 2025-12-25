@@ -18,6 +18,7 @@ pub const yellow = "\x1b[33m";
 pub const blue = "\x1b[34m";
 pub const magenta = "\x1b[35m";
 pub const cyan = "\x1b[36m";
+pub const bright_magenta = "\x1b[95m"; // light purple, used for variables
 pub const gray = "\x1b[90m"; // bright black
 
 // Background colors
