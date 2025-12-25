@@ -1,0 +1,38 @@
+#!./zig-out/bin/oshen
+
+# Benchmark runner for comparing shell performance
+# Runs each benchmark and reports timing
+
+var BENCHMARKS_DIR (pwd)/scripts/benchmarks
+
+print --nl --blue "Building Oshen..."
+zig build -Doptimize=ReleaseFast
+
+fun run_benchmark
+    print --nl --yellow "Running $1..."
+    time -p sh -c "$2"
+end
+
+if test -x ./zig-out/bin/oshen
+    run_benchmark "Oshen" "./zig-out/bin/oshen $BENCHMARKS_DIR/oshen.wave"
+else
+    print "Oshen: (not built)"
+end
+
+if type zsh > /dev/null 2>&1
+    run_benchmark "Zsh" "zsh $BENCHMARKS_DIR/zsh.sh"
+else
+    print "Zsh: (not installed)"
+end
+
+if type fish > /dev/null 2>&1
+    run_benchmark "Fish" "fish $BENCHMARKS_DIR/fish.fish"
+else
+    print "Fish: (not installed)"
+end
+
+if type elvish > /dev/null 2>&1
+    run_benchmark "Elvish" "elvish $BENCHMARKS_DIR/elvish.elv"
+else
+    print "Elvish: (not installed)"
+end

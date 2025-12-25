@@ -495,14 +495,46 @@ fn executeBackgroundJob(allocator: std.mem.Allocator, state: *State, stmt: expan
 // Functions
 // =============================================================================
 
-/// Restore $argv to its previous value or unset it
-fn restoreArgv(state: *State, old_argv: ?[]const []const u8) void {
-    if (old_argv) |v| {
-        state.setVarList("argv", v) catch {};
-    } else {
-        state.unsetVar("argv");
+/// Saved argv state for restoration after function call.
+/// Deep copies values using state's allocator to outlive ephemeral arenas.
+const SavedArgv = struct {
+    values: ?[]const []const u8,
+    allocator: std.mem.Allocator,
+
+    fn save(state: *State) SavedArgv {
+        const allocator = state.allocator;
+        const old = state.getVarList("argv") orelse return .{ .values = null, .allocator = allocator };
+        return .{
+            .values = deepCopy(allocator, old) catch null,
+            .allocator = allocator,
+        };
     }
-}
+
+    fn restore(self: SavedArgv, state: *State) void {
+        defer self.deinit();
+        if (self.values) |v| state.setVarList("argv", v) catch {} else state.unsetVar("argv");
+    }
+
+    fn deinit(self: SavedArgv) void {
+        const values = self.values orelse return;
+        for (values) |v| self.allocator.free(v);
+        self.allocator.free(values);
+    }
+
+    fn deepCopy(allocator: std.mem.Allocator, source: []const []const u8) ![]const []const u8 {
+        const copy = try allocator.alloc([]const u8, source.len);
+        var copied: usize = 0;
+        errdefer {
+            for (copy[0..copied]) |s| allocator.free(s);
+            allocator.free(copy);
+        }
+        for (source) |s| {
+            copy[copied] = try allocator.dupe(u8, s);
+            copied += 1;
+        }
+        return copy;
+    }
+};
 
 /// Execute deferred commands from a given index in LIFO order.
 /// This allows nested functions to only run their own defers.
@@ -519,35 +551,34 @@ fn runFunctionWithArgs(allocator: std.mem.Allocator, state: *State, cmd: Expande
     if (cmd.argv.len == 0) return null;
 
     const name = cmd.argv[0];
-    const body = state.getFunction(name) orelse return null;
+    const func = state.getFunction(name) orelse return null;
 
-    // Save current $argv (as list)
-    const old_argv = state.getVarList("argv");
+    // Save current $argv (deep copy to survive setVarList freeing the original)
+    const saved_argv = SavedArgv.save(state);
 
     // Remember how many deferred commands exist before this function
-    // (so we only run defers added by this function)
     const defer_count_before = state.deferred.items.len;
 
-    // Use Zig's defer for guaranteed cleanup on all exit paths
-    defer restoreArgv(state, old_argv);
+    // Guaranteed cleanup on all exit paths
+    defer saved_argv.restore(state);
     defer runDeferredCommandsFromIndex(allocator, state, defer_count_before);
 
     // Set $argv to function arguments (skip function name)
-    if (cmd.argv.len > 1) {
-        state.setVarList("argv", cmd.argv[1..]) catch {};
-    } else {
-        // Empty argv for no arguments
-        state.setVarList("argv", &[_][]const u8{}) catch {};
-    }
+    state.setVarList("argv", if (cmd.argv.len > 1) cmd.argv[1..] else &.{}) catch {};
 
-    // Execute the function body, catching errors and converting to status
-    const status = interpreter_mod.execute(allocator, state, body) catch |err| {
+    // Get cached parse or parse on first call, then execute
+    const parsed = func.getParsed() catch |err| {
         io.printError("function {s}: {}\n", .{ name, err });
         state.fn_return = false;
         return 1;
     };
 
-    // If fn_return is set, use state.status (set by return statement), otherwise use last command status
+    const status = interpreter_mod.executeAst(allocator, state, parsed) catch |err| {
+        io.printError("function {s}: {}\n", .{ name, err });
+        state.fn_return = false;
+        return 1;
+    };
+
     if (state.fn_return) {
         state.fn_return = false;
         return state.status;

@@ -38,8 +38,8 @@ const BRANCH_SEGMENT_END = 1536;
 /// If a `prompt` function is defined, execute it and use its output.
 /// Otherwise, use the default cwd-based prompt.
 pub fn build(allocator: std.mem.Allocator, state: *State, buf: []u8) []const u8 {
-    if (state.getFunction("prompt")) |body| {
-        const output = interpreter.executeAndCapture(allocator, state, body) catch return buildDefault(allocator, state, buf);
+    if (state.getFunction("prompt")) |func| {
+        const output = interpreter.executeAndCapture(allocator, state, func.source) catch return buildDefault(allocator, state, buf);
         defer allocator.free(output);
         const len = @min(output.len, buf.len);
         @memcpy(buf[0..len], output[0..len]);

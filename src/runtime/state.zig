@@ -6,10 +6,40 @@
 const std = @import("std");
 const jobs = @import("jobs.zig");
 const env = @import("env.zig");
+const interpreter = @import("../interpreter/interpreter.zig");
 
 pub const JobTable = jobs.JobTable;
 pub const Job = jobs.Job;
 pub const JobStatus = jobs.JobStatus;
+
+/// A user-defined function with lazy-parsed AST caching.
+pub const Function = struct {
+    /// The raw source text of the function body (owned by State's allocator)
+    source: []const u8,
+
+    /// Cached parse result; arena owns the AST memory, backed by page_allocator for stability
+    cached: ?struct {
+        arena: std.heap.ArenaAllocator,
+        parsed: interpreter.ParsedInput,
+    } = null,
+
+    /// Get the parsed AST, parsing on first call.
+    /// Uses page_allocator for the arena to ensure it outlives any execution arenas.
+    pub fn getParsed(self: *Function) !interpreter.ParsedInput {
+        if (self.cached) |c| return c.parsed;
+
+        var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+        const parsed = try interpreter.parseInput(arena.allocator(), self.source);
+        self.cached = .{ .arena = arena, .parsed = parsed };
+        return parsed;
+    }
+
+    /// Free all memory owned by this function.
+    pub fn deinit(self: *Function, allocator: std.mem.Allocator) void {
+        if (self.cached) |*c| c.arena.deinit();
+        allocator.free(self.source);
+    }
+};
 
 /// Shell state: variables, status, cwd, options
 pub const State = struct {
@@ -24,8 +54,8 @@ pub const State = struct {
     /// Exported environment variables
     exports: std.StringHashMap([]const u8),
 
-    /// User-defined functions (name -> body source)
-    functions: std.StringHashMap([]const u8),
+    /// User-defined functions (name -> Function with cached AST)
+    functions: std.StringHashMap(Function),
 
     /// Aliases (name -> expansion text)
     aliases: std.StringHashMap([]const u8),
@@ -91,7 +121,7 @@ pub const State = struct {
             .allocator = allocator,
             .vars = std.StringHashMap([]const []const u8).init(allocator),
             .exports = std.StringHashMap([]const u8).init(allocator),
-            .functions = std.StringHashMap([]const u8).init(allocator),
+            .functions = std.StringHashMap(Function).init(allocator),
             .aliases = std.StringHashMap([]const u8).init(allocator),
             .jobs = JobTable.init(allocator),
             .deferred = .empty,
@@ -125,11 +155,11 @@ pub const State = struct {
         }
         self.exports.deinit();
 
-        // Free all function names and bodies
+        // Free all function names and cached parse state
         var fn_iter = self.functions.iterator();
         while (fn_iter.next()) |entry| {
             self.allocator.free(entry.key_ptr.*);
-            self.allocator.free(entry.value_ptr.*);
+            entry.value_ptr.deinit(self.allocator);
         }
         self.functions.deinit();
 
@@ -212,23 +242,25 @@ pub const State = struct {
         }
     }
 
-    /// Get a function body by name
-    pub fn getFunction(self: *State, name: []const u8) ?[]const u8 {
-        return self.functions.get(name);
+    /// Get a function by name (returns mutable pointer for lazy caching)
+    pub fn getFunction(self: *State, name: []const u8) ?*Function {
+        return self.functions.getPtr(name);
     }
 
     /// Define or redefine a function
     pub fn setFunction(self: *State, name: []const u8, body: []const u8) !void {
         if (self.functions.fetchRemove(name)) |old| {
-            self.freeStringEntry(old);
+            self.allocator.free(old.key);
+            var func = old.value;
+            func.deinit(self.allocator);
         }
 
         const key = try self.allocator.dupe(u8, name);
         errdefer self.allocator.free(key);
-        const value = try self.allocator.dupe(u8, body);
-        errdefer self.allocator.free(value);
+        const source = try self.allocator.dupe(u8, body);
+        errdefer self.allocator.free(source);
 
-        try self.functions.put(key, value);
+        try self.functions.put(key, .{ .source = source });
     }
 
     /// Get an alias expansion by name
@@ -319,16 +351,16 @@ test "functions: set and get" {
 
     try state.setFunction("greet", "echo hello");
 
-    const body = state.getFunction("greet");
-    try testing.expect(body != null);
-    try testing.expectEqualStrings("echo hello", body.?);
+    const func = state.getFunction("greet");
+    try testing.expect(func != null);
+    try testing.expectEqualStrings("echo hello", func.?.source);
 }
 
 test "functions: get nonexistent returns null" {
     var state = State.init(testing.allocator);
     defer state.deinit();
 
-    try testing.expectEqual(@as(?[]const u8, null), state.getFunction("nonexistent"));
+    try testing.expectEqual(@as(?*Function, null), state.getFunction("nonexistent"));
 }
 
 test "functions: redefinition replaces body" {
@@ -338,8 +370,8 @@ test "functions: redefinition replaces body" {
     try state.setFunction("greet", "echo v1");
     try state.setFunction("greet", "echo v2");
 
-    const body = state.getFunction("greet");
-    try testing.expectEqualStrings("echo v2", body.?);
+    const func = state.getFunction("greet");
+    try testing.expectEqualStrings("echo v2", func.?.source);
 }
 
 test "functions: multiple functions" {
@@ -350,9 +382,9 @@ test "functions: multiple functions" {
     try state.setFunction("bar", "echo bar");
     try state.setFunction("baz", "echo baz");
 
-    try testing.expectEqualStrings("echo foo", state.getFunction("foo").?);
-    try testing.expectEqualStrings("echo bar", state.getFunction("bar").?);
-    try testing.expectEqualStrings("echo baz", state.getFunction("baz").?);
+    try testing.expectEqualStrings("echo foo", state.getFunction("foo").?.source);
+    try testing.expectEqualStrings("echo bar", state.getFunction("bar").?.source);
+    try testing.expectEqualStrings("echo baz", state.getFunction("baz").?.source);
 }
 
 test "variables: unset removes variable" {

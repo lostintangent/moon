@@ -8,6 +8,7 @@
 //!   print --green "success"                     # Green text, auto-reset
 //!   print --bold --red "error" --reset "normal" # Mixed styles
 //!   print -n --blue "status: "                  # No newline, still resets
+//!   print --nl --yellow "section"               # Extra newline before text
 
 const std = @import("std");
 const builtins = @import("../builtins.zig");
@@ -16,11 +17,13 @@ const ansi = @import("../../terminal/ansi.zig");
 pub const builtin = builtins.Builtin{
     .name = "print",
     .run = run,
-    .help = "print [-n] [--color]... [text]... - Print with colors (--green, --red, --yellow, --blue, --magenta, --purple, --cyan, --gray, --bold, --dim, --reset)",
+    .help = "print [-n] [--color]... [text]... - Print with colors (--nl, --green, --red, --yellow, --blue, --magenta, --purple, --cyan, --gray, --bold, --dim, --reset)",
 };
 
 /// O(1) lookup table for color/style flags
 const styles = std.StaticStringMap([]const u8).initComptime(.{
+    // Formatting
+    .{ "--nl", "\r\n" },
     // Colors
     .{ "--red", ansi.red },
     .{ "--green", ansi.green },

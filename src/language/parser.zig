@@ -48,6 +48,7 @@ pub const ParseError = error{
     InvalidEach,
     UnterminatedEach,
     UnterminatedWhile,
+    MissingSeparator,
     OutOfMemory,
 };
 
@@ -124,6 +125,13 @@ pub const Parser = struct {
         return tok.kind == .separator;
     }
 
+    /// Returns true if the previous token is a separator (or we're at start of input).
+    /// Used to check if current position is in "command position" (start of a statement).
+    fn isPrevTokenSeparator(self: *const Parser) bool {
+        if (self.pos == 0) return true;
+        return self.tokens[self.pos - 1].kind == .separator;
+    }
+
     /// Returns true if current token is a word.
     fn isWord(self: *const Parser) bool {
         const tok = self.peek() orelse return false;
@@ -141,6 +149,14 @@ pub const Parser = struct {
     /// Returns true if current token starts a block (if, for, each, while, fun).
     fn isBlockStart(self: *const Parser) bool {
         return self.isOp("if") or self.isOp("for") or self.isOp("each") or self.isOp("while") or self.isOp("fun");
+    }
+
+    /// Consumes 'end' keyword and validates that a separator or EOF follows.
+    fn consumeEnd(self: *Parser) ParseError!void {
+        _ = self.advance(); // consume 'end'
+        if (self.pos < self.tokens.len and !self.isSeparator()) {
+            return ParseError.MissingSeparator;
+        }
     }
 
     // =========================================================================
@@ -362,24 +378,30 @@ pub const Parser = struct {
     ///
     /// `terminators` specifies which keywords (besides "end" at depth 0) can end the scan.
     /// For example, parseIfBranch passes &.{"else"} to stop at "else" at depth 1.
+    ///
+    /// Keywords are only recognized in command position (after a separator or at start).
+    /// This allows `echo end` to work correctly - "end" as an argument is not a terminator.
     fn scanToBlockEnd(self: *Parser, terminators: []const []const u8) ?usize {
         var depth: usize = 1;
 
         while (self.pos < self.tokens.len) {
-            if (self.isBlockStart()) {
+            // Only recognize keywords in command position (after separator)
+            const in_command_position = self.isPrevTokenSeparator();
+
+            if (in_command_position and self.isBlockStart()) {
                 // Check if this is "else if" - don't increment depth since it's part of the same if statement
                 const is_else_if = self.isOp("if") and self.isPrevTokenElse();
                 if (!is_else_if) {
                     depth += 1;
                 }
                 _ = self.advance();
-            } else if (self.isOp("end")) {
+            } else if (in_command_position and self.isOp("end")) {
                 depth -= 1;
                 if (depth == 0) return self.pos;
                 _ = self.advance();
             } else {
-                // Check custom terminators at depth 1
-                if (depth == 1) {
+                // Check custom terminators at depth 1 (only in command position)
+                if (depth == 1 and in_command_position) {
                     for (terminators) |term| {
                         if (self.isOp(term)) return self.pos;
                     }
@@ -425,17 +447,11 @@ pub const Parser = struct {
         return std.mem.trim(u8, self.extractSourceRange(body_start, end_pos), " \t\n");
     }
 
-    /// Captures condition source (tokens until separator or terminators).
+    /// Captures condition source (tokens until separator).
     /// Advances past the condition and skips trailing separators.
-    fn captureCondition(self: *Parser, terminators: []const []const u8) []const u8 {
+    fn captureCondition(self: *Parser) []const u8 {
         const start = self.pos;
         while (self.pos < self.tokens.len and !self.isSeparator()) {
-            for (terminators) |term| {
-                if (self.isOp(term)) {
-                    const result = self.extractSourceRange(start, self.pos);
-                    return std.mem.trim(u8, result, " \t\n");
-                }
-            }
             _ = self.advance();
         }
         const result = self.extractSourceRange(start, self.pos);
@@ -452,24 +468,14 @@ pub const Parser = struct {
         _ = self.advance(); // consume 'fun'
         self.skipSeparators();
 
-        // Expect function name (a word)
         if (!self.isWord()) return ParseError.InvalidFunctionName;
-
-        const name_tok = self.advance().?;
-        const name = blk: {
-            const segs = name_tok.kind.word;
-            if (segs.len == 1 and segs[0].quotes == .none) {
-                break :blk segs[0].text;
-            }
-            return ParseError.InvalidFunctionName;
-        };
+        const name = extractSimpleWord(self.advance().?) orelse return ParseError.InvalidFunctionName;
 
         self.skipSeparators();
-
         const body = try self.captureBlockBody(&.{}, ParseError.UnterminatedFunction);
-        _ = self.advance(); // consume 'end'
+        try self.consumeEnd();
 
-        return Statement{ .kind = .{ .function = FunctionDefinition{ .name = name, .body = body } } };
+        return .{ .kind = .{ .function = .{ .name = name, .body = body } } };
     }
 
     /// Parses an if statement with optional else-if chains:
@@ -497,18 +503,18 @@ pub const Parser = struct {
                 } else {
                     // Final else - capture body until end
                     else_body = try self.captureBlockBody(&.{}, ParseError.UnterminatedIf);
-                    _ = self.advance(); // consume 'end'
+                    try self.consumeEnd();
                     break;
                 }
             } else if (self.isOp("end")) {
-                _ = self.advance(); // consume 'end'
+                try self.consumeEnd();
                 break;
             } else {
                 return ParseError.UnterminatedIf;
             }
         }
 
-        return Statement{ .kind = .{ .@"if" = IfStatement{
+        return .{ .kind = .{ .@"if" = .{
             .branches = try branches.toOwnedSlice(self.allocator),
             .else_body = else_body,
         } } };
@@ -518,11 +524,9 @@ pub const Parser = struct {
     /// Expects parser to be positioned after 'if' keyword.
     fn parseIfBranch(self: *Parser) ParseError!IfBranch {
         self.skipSeparators();
-
-        const condition = self.captureCondition(&.{ "end", "else" });
+        const condition = self.captureCondition();
         const body = try self.captureBlockBody(&.{"else"}, ParseError.UnterminatedIf);
-
-        return IfBranch{ .condition = condition, .body = body };
+        return .{ .condition = condition, .body = body };
     }
 
     /// Parses an each loop (for is an alias).
@@ -556,11 +560,11 @@ pub const Parser = struct {
             break :blk "item";
         };
 
-        const items_source = self.captureCondition(&.{"end"});
+        const items_source = self.captureCondition();
         const body = try self.captureBlockBody(&.{}, ParseError.UnterminatedEach);
-        _ = self.advance(); // consume 'end'
+        try self.consumeEnd();
 
-        return Statement{ .kind = .{ .each = EachStatement{
+        return .{ .kind = .{ .each = .{
             .variable = variable,
             .items_source = items_source,
             .body = body,
@@ -572,19 +576,52 @@ pub const Parser = struct {
         _ = self.advance(); // consume 'while'
         self.skipSeparators();
 
-        const condition = self.captureCondition(&.{"end"});
+        const condition = self.captureCondition();
         const body = try self.captureBlockBody(&.{}, ParseError.UnterminatedWhile);
-        _ = self.advance(); // consume 'end'
+        try self.consumeEnd();
 
-        return Statement{ .kind = .{ .@"while" = WhileStatement{
-            .condition = condition,
-            .body = body,
-        } } };
+        return .{ .kind = .{ .@"while" = .{ .condition = condition, .body = body } } };
     }
 
     // =========================================================================
     // Statement parsing
     // =========================================================================
+
+    /// Parses a return statement with optional status.
+    fn parseReturnStatement(self: *Parser) Statement {
+        _ = self.advance(); // consume 'return'
+        const status = if (self.isWord()) self.captureWord() else null;
+        return .{ .kind = .{ .@"return" = status } };
+    }
+
+    /// Captures a single word token as trimmed source text.
+    fn captureWord(self: *Parser) []const u8 {
+        const start = self.pos;
+        _ = self.advance();
+        return std.mem.trim(u8, self.extractSourceRange(start, self.pos), " \t\n");
+    }
+
+    /// Parses a defer statement.
+    fn parseDeferStatement(self: *Parser) Statement {
+        _ = self.advance(); // consume 'defer'
+        const start = self.pos;
+        while (self.pos < self.tokens.len and !self.isSeparator()) {
+            _ = self.advance();
+        }
+        const cmd_source = std.mem.trim(u8, self.extractSourceRange(start, self.pos), " \t\n");
+        return .{ .kind = .{ .@"defer" = cmd_source } };
+    }
+
+    /// Parses an output capture (=> or =>@).
+    fn parseCapture(self: *Parser) ParseError!Capture {
+        const op = self.advance().?.kind.operator;
+        const mode: CaptureMode = if (std.mem.eql(u8, op, "=>@")) .lines else .string;
+
+        if (!self.isWord()) return ParseError.InvalidCapture;
+        const name = extractSimpleWord(self.advance().?) orelse return ParseError.InvalidCapture;
+
+        return .{ .mode = mode, .variable = name };
+    }
 
     /// Parses a single statement (command, control flow, or function definition).
     fn parseStatement(self: *Parser) ParseError!?Statement {
@@ -597,37 +634,14 @@ pub const Parser = struct {
         // Simple statements
         if (self.isOp("break")) {
             _ = self.advance();
-            return Statement{ .kind = .@"break" };
+            return .{ .kind = .@"break" };
         }
         if (self.isOp("continue")) {
             _ = self.advance();
-            return Statement{ .kind = .@"continue" };
+            return .{ .kind = .@"continue" };
         }
-        if (self.isOp("return")) {
-            const return_pos = self.pos;
-            _ = self.advance();
-            // Check for optional status argument - capture as raw source string
-            const status_str: ?[]const u8 = if (self.isWord()) blk: {
-                const start = self.pos;
-                _ = self.advance();
-                break :blk std.mem.trim(u8, self.extractSourceRange(start, self.pos), " \t\n");
-            } else if (self.pos > return_pos + 1) blk: {
-                // Handle case where there's something after return but it's not a word
-                break :blk null;
-            } else null;
-            return Statement{ .kind = .{ .@"return" = status_str } };
-        }
-        if (self.isOp("defer")) {
-            _ = self.advance(); // consume 'defer'
-            // Capture the rest of the line as the deferred command (until separator)
-            const start = self.pos;
-            while (self.pos < self.tokens.len and !self.isSeparator()) {
-                _ = self.advance();
-            }
-            const cmd_source = std.mem.trim(u8, self.extractSourceRange(start, self.pos), " \t\n");
-            // Note: do NOT skip separators here - let the main loop handle them
-            return Statement{ .kind = .{ .@"defer" = cmd_source } };
-        }
+        if (self.isOp("return")) return self.parseReturnStatement();
+        if (self.isOp("defer")) return self.parseDeferStatement();
 
         // Command statement
         const chains = try self.parseLogical() orelse return null;
@@ -641,22 +655,10 @@ pub const Parser = struct {
 
         if (self.isOp("=>") or self.isOp("=>@")) {
             if (background) return ParseError.CaptureWithBackground;
-
-            const cap_tok = self.advance().?;
-            const mode: CaptureMode = if (std.mem.eql(u8, cap_tok.kind.operator, "=>@")) .lines else .string;
-
-            if (!self.isWord()) return ParseError.InvalidCapture;
-
-            const var_tok = self.advance().?;
-            const parts = var_tok.kind.word;
-            if (parts.len == 1 and parts[0].quotes == .none) {
-                capture = .{ .mode = mode, .variable = parts[0].text };
-            } else {
-                return ParseError.InvalidCapture;
-            }
+            capture = try self.parseCapture();
         }
 
-        return Statement{ .kind = .{ .command = CommandStatement{
+        return .{ .kind = .{ .command = .{
             .background = background,
             .capture = capture,
             .chains = chains,
@@ -672,27 +674,12 @@ pub const Parser = struct {
 
         self.skipSeparators();
         while (self.pos < self.tokens.len) {
+            const stmt = try self.parseStatement() orelse break;
+            try statements.append(self.allocator, stmt);
             self.skipSeparators();
-            if (self.pos >= self.tokens.len) break;
-
-            if (try self.parseStatement()) |stmt| {
-                try statements.append(self.allocator, stmt);
-            } else {
-                break;
-            }
-
-            if (self.pos < self.tokens.len) {
-                if (self.isSeparator()) {
-                    self.skipSeparators();
-                } else if (self.isOp("&")) {
-                    continue;
-                } else {
-                    break;
-                }
-            }
         }
 
-        return Program{ .statements = try statements.toOwnedSlice(self.allocator) };
+        return .{ .statements = try statements.toOwnedSlice(self.allocator) };
     }
 };
 

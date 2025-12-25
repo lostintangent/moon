@@ -7,23 +7,6 @@
 //! - `WordPart`: A segment of a word token with its quoting context
 //!       (e.g., `hello"world"` produces two WordParts: one unquoted, one double-quoted)
 //!
-//! ## Multi-Part Words
-//!
-//! Words can contain multiple parts when quote boundaries are crossed. This enables
-//! Cartesian product expansion with variables and globs:
-//!
-//! - `$items"_suffix"` → expands to `item1_suffix item2_suffix item3_suffix`
-//! - `*.txt"_backup"` → expands to `file1.txt_backup file2.txt_backup`
-//!
-//! Each part tracks its quoting context (`QuoteKind`) so the expander can apply
-//! the correct expansion rules:
-//! - Bare parts: full expansion (variables, globs, escapes)
-//! - Double-quoted: variables and escapes only (globs suppressed)
-//! - Single-quoted: no expansion (literal text)
-//!
-//! Note: Brace expansion syntax (`{pattern}_suffix`) is also supported as an
-//! alternative, more explicit way to achieve Cartesian products. See expand.zig.
-//!
 //! ## Keywords
 //!
 //! Unlike most programming languages, keywords (if, for, while, etc.) are
@@ -208,10 +191,18 @@ pub fn isVariable(text: []const u8) bool {
     return true;
 }
 
+/// Returns true if `c` is horizontal whitespace (space or tab).
+/// Note: newlines are not whitespace - they are command separators.
+pub fn isWhitespace(c: u8) bool {
+    return c == ' ' or c == '\t';
+}
+
+/// Returns true if `c` is a command separator (newline or semicolon).
+pub fn isSeparator(c: u8) bool {
+    return c == '\n' or c == ';';
+}
+
 /// Returns true if `c` is a word boundary (whitespace or command separator).
 pub fn isWordBreak(c: u8) bool {
-    return switch (c) {
-        ' ', '\t', '\n', ';' => true,
-        else => false,
-    };
+    return isWhitespace(c) or isSeparator(c);
 }

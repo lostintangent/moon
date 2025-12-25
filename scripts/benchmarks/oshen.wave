@@ -1,0 +1,11 @@
+#!../../zig-out/bin/oshen
+# Benchmark: while loop with function call (100k iterations)
+
+fun inc
+    increment i
+end
+
+var i 0
+while test $i -lt 100000
+    inc
+end

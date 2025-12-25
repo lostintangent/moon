@@ -50,7 +50,7 @@ pub const Lexer = struct {
 
     /// Returns the character at the current position, or null if at end of input.
     inline fn peek(self: *const Lexer) ?u8 {
-        return if (self.pos < self.input.len) self.input[self.pos] else null;
+        return self.peekAt(0);
     }
 
     /// Returns the character at `offset` positions ahead, or null if out of bounds.
@@ -68,7 +68,7 @@ pub const Lexer = struct {
 
     /// Advances position by one character.
     inline fn advance(self: *Lexer) void {
-        if (self.pos < self.input.len) self.pos += 1;
+        self.advanceBy(1);
     }
 
     /// Advances position by `n` characters.
@@ -87,11 +87,9 @@ pub const Lexer = struct {
 
     /// Skips spaces and tabs (not newlines - those are separators).
     fn skipWhitespace(self: *Lexer) void {
-        while (self.pos < self.input.len) {
-            switch (self.input[self.pos]) {
-                ' ', '\t' => self.pos += 1,
-                else => break,
-            }
+        while (self.peek()) |c| {
+            if (!token_types.isWhitespace(c)) break;
+            self.advance();
         }
     }
 
@@ -131,11 +129,8 @@ pub const Lexer = struct {
     /// Reads a separator token (newline or semicolon) if present. Returns true if read.
     fn tryReadSeparator(self: *Lexer, tokens: *std.ArrayListUnmanaged(Token)) error{OutOfMemory}!bool {
         const c = self.peek() orelse return false;
-        const sep: []const u8 = switch (c) {
-            '\n' => "\n",
-            ';' => ";",
-            else => return false,
-        };
+        if (!token_types.isSeparator(c)) return false;
+        const sep: []const u8 = if (c == '\n') "\n" else ";";
         const start = self.pos;
         self.advance();
         try tokens.append(self.allocator, Token.initSep(sep, self.makeSpan(start)));
@@ -303,7 +298,8 @@ pub const Lexer = struct {
         buf.clearRetainingCapacity();
 
         while (self.peek()) |c| {
-            // Stop at operators
+            // Stop at word breaks and operators
+            if (token_types.isWordBreak(c)) break;
             if (self.peekOperator() != null) break;
 
             switch (c) {
@@ -312,7 +308,6 @@ pub const Lexer = struct {
                     try self.handleBareWordEscape(buf);
                 },
                 '"', '\'' => break, // Quote starts new segment
-                ' ', '\t', '\n', ';' => break, // Word break
                 '$' => {
                     if (self.peekAt(1) == '(') {
                         try self.readCommandSubstitution(buf);
@@ -352,8 +347,8 @@ pub const Lexer = struct {
             switch (c) {
                 '"' => try self.readDoubleQuoted(&parts, &buffer),
                 '\'' => try self.readSingleQuoted(&parts),
-                ' ', '\t', '\n', ';' => break,
                 else => {
+                    if (token_types.isWordBreak(c)) break;
                     if (self.peekOperator() != null) break;
                     if (!try self.readBareWord(&parts, &buffer)) break;
                 },
