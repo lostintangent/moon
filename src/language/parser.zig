@@ -19,9 +19,9 @@ const Token = token_types.Token;
 const TokenSpan = token_types.TokenSpan;
 const WordPart = token_types.WordPart;
 const QuoteKind = token_types.QuoteKind;
+const Operator = token_types.Operator;
 const Program = ast.Program;
 const Statement = ast.Statement;
-const StatementKind = ast.StatementKind;
 const CommandStatement = ast.CommandStatement;
 const FunctionDefinition = ast.FunctionDefinition;
 const IfStatement = ast.IfStatement;
@@ -99,24 +99,25 @@ pub const Parser = struct {
     // Token type predicates
     // =========================================================================
 
-    /// Returns true if current token is the specified operator.
-    fn isOperator(self: *const Parser, op: []const u8) bool {
-        const tok = self.peek() orelse return false;
-        return tok.kind == .operator and std.mem.eql(u8, tok.kind.operator, op);
+    /// Returns the current operator if the token is an operator, null otherwise.
+    fn peekOperator(self: *const Parser) ?Operator {
+        const tok = self.peek() orelse return null;
+        return if (tok.kind == .operator) tok.kind.operator else null;
     }
 
-    /// Returns true if current token is an unquoted bare word matching the given keyword.
+    /// Returns true if current token is the specified operator.
+    fn isOperator(self: *const Parser, op: Operator) bool {
+        return self.peekOperator() == op;
+    }
+
+    /// Returns true if current token is an unquoted bare word matching the given text.
+    /// Used for checking keywords that can appear in command position (if, for, while, etc.).
+    /// Note: Keywords are lexed as words, not operators, so this only checks words.
     fn isKeyword(self: *const Parser, keyword: []const u8) bool {
         const tok = self.peek() orelse return false;
         if (tok.kind != .word) return false;
         const segs = tok.kind.word;
         return segs.len == 1 and segs[0].quotes == .none and std.mem.eql(u8, segs[0].text, keyword);
-    }
-
-    /// Returns true if current token matches the specified operator or keyword.
-    /// Used for checking keywords that can appear in command position (if, for, while, etc.).
-    fn isOp(self: *const Parser, op: []const u8) bool {
-        return self.isOperator(op) or (token_types.isKeyword(op) and self.isKeyword(op));
     }
 
     /// Returns true if current token is a separator (newline or semicolon).
@@ -138,17 +139,14 @@ pub const Parser = struct {
         return tok.kind == .word;
     }
 
-    /// Returns true if current word token is a logical operator keyword (and, or).
+    /// Returns true if current word token is a logical keyword (and, or).
     fn isLogicalKeyword(self: *const Parser) bool {
-        const tok = self.peek() orelse return false;
-        if (tok.kind != .word) return false;
-        const parts = tok.kind.word;
-        return parts.len == 1 and parts[0].quotes == .none and token_types.isLogicalOperator(parts[0].text);
+        return self.isKeyword("and") or self.isKeyword("or");
     }
 
     /// Returns true if current token starts a block (if, for, each, while, fun).
     fn isBlockStart(self: *const Parser) bool {
-        return self.isOp("if") or self.isOp("for") or self.isOp("each") or self.isOp("while") or self.isOp("fun");
+        return self.isKeyword("if") or self.isKeyword("for") or self.isKeyword("each") or self.isKeyword("while") or self.isKeyword("fun");
     }
 
     /// Consumes 'end' keyword and validates that a separator or EOF follows.
@@ -195,48 +193,41 @@ pub const Parser = struct {
     /// Attempts to parse a logical operator (&&, ||, and, or) at current position.
     /// Returns the operator type if found, null otherwise.
     fn tryParseLogicalOp(self: *const Parser) ?ChainOperator {
-        const tok = self.peek() orelse return null;
-
-        return switch (tok.kind) {
-            .operator => |t| token_types.parseLogicalOperator(t),
-            .word => |segs| blk: {
-                if (segs.len != 1 or segs[0].quotes != .none) break :blk null;
-                break :blk token_types.parseLogicalOperator(segs[0].text);
-            },
-            .separator => null,
-        };
+        // Check for operator tokens (&&, ||)
+        if (self.peekOperator()) |op| {
+            return switch (op) {
+                .@"and" => .@"and",
+                .@"or" => .@"or",
+                else => null,
+            };
+        }
+        // Check for keyword tokens (and, or)
+        if (self.isKeyword("and")) return .@"and";
+        if (self.isKeyword("or")) return .@"or";
+        return null;
     }
 
     // =========================================================================
     // Redirect parsing
     // =========================================================================
 
-    /// Determines the source file descriptor from a redirect operator.
-    /// - Operators starting with '2' redirect stderr (fd 2)
-    /// - Input redirects '<' target stdin (fd 0)
-    /// - All other redirects target stdout (fd 1)
-    fn getRedirectFd(op_text: []const u8) u8 {
-        if (op_text.len == 0) return 1;
-        return switch (op_text[0]) {
-            '2' => 2,
-            '<' => 0,
-            else => 1,
-        };
-    }
-
     /// Parses a redirect operator and its target. Returns null if no redirect present.
     fn parseRedirect(self: *Parser) ParseError!?Redirect {
-        const tok = self.peek() orelse return null;
-        if (tok.kind != .operator) return null;
-
-        const op_text = tok.kind.operator;
-        if (!token_types.isRedirectOperator(op_text)) return null;
+        const op = self.peekOperator() orelse return null;
+        if (!op.isRedirect()) return null;
 
         _ = self.advance();
-        const fd = getRedirectFd(op_text);
+
+        // Determine source file descriptor
+        const fd: u8 = switch (op) {
+            .redirect_stdin => 0,
+            .redirect_stderr, .redirect_stderr_append, .redirect_stderr_to_stdout => 2,
+            .redirect_stdout, .redirect_stdout_append, .redirect_both => 1,
+            else => unreachable,
+        };
 
         // Handle fd duplication (2>&1)
-        if (std.mem.eql(u8, op_text, "2>&1")) {
+        if (op == .redirect_stderr_to_stdout) {
             return Redirect{ .from_fd = fd, .kind = .{ .dup = 1 } };
         }
 
@@ -246,12 +237,12 @@ pub const Parser = struct {
         const parts = word_tok.kind.word;
 
         // Preserve word parts for proper expansion (respects quoting)
-        const kind: RedirectKind = if (op_text[0] == '<')
-            .{ .read = parts }
-        else if (std.mem.endsWith(u8, op_text, ">>"))
-            .{ .write_append = parts }
-        else
-            .{ .write_truncate = parts };
+        const kind: RedirectKind = switch (op) {
+            .redirect_stdin => .{ .read = parts },
+            .redirect_stdout_append, .redirect_stderr_append => .{ .write_append = parts },
+            .redirect_stdout, .redirect_stderr, .redirect_both => .{ .write_truncate = parts },
+            else => unreachable,
+        };
 
         return Redirect{ .from_fd = fd, .kind = kind };
     }
@@ -325,11 +316,8 @@ pub const Parser = struct {
         const first_cmd = try self.parseCommand() orelse return null;
         try commands.append(self.allocator, first_cmd);
 
-        while (true) {
-            const tok = self.peek() orelse break;
-            if (tok.kind != .operator) break;
-            if (!token_types.isPipeOperator(tok.kind.operator)) break;
-
+        while (self.peekOperator()) |op| {
+            if (!op.isPipe()) break;
             _ = self.advance();
             self.skipSeparators();
             const cmd = try self.parseCommand() orelse return ParseError.UnexpectedEOF;
@@ -390,12 +378,12 @@ pub const Parser = struct {
 
             if (in_command_position and self.isBlockStart()) {
                 // Check if this is "else if" - don't increment depth since it's part of the same if statement
-                const is_else_if = self.isOp("if") and self.isPrevTokenElse();
+                const is_else_if = self.isKeyword("if") and self.isPrevTokenElse();
                 if (!is_else_if) {
                     depth += 1;
                 }
                 _ = self.advance();
-            } else if (in_command_position and self.isOp("end")) {
+            } else if (in_command_position and self.isKeyword("end")) {
                 depth -= 1;
                 if (depth == 0) return self.pos;
                 _ = self.advance();
@@ -403,7 +391,7 @@ pub const Parser = struct {
                 // Check custom terminators at depth 1 (only in command position)
                 if (depth == 1 and in_command_position) {
                     for (terminators) |term| {
-                        if (self.isOp(term)) return self.pos;
+                        if (self.isKeyword(term)) return self.pos;
                     }
                 }
                 _ = self.advance();
@@ -475,7 +463,7 @@ pub const Parser = struct {
         const body = try self.captureBlockBody(&.{}, ParseError.UnterminatedFunction);
         try self.consumeEnd();
 
-        return .{ .kind = .{ .function = .{ .name = name, .body = body } } };
+        return .{ .function = .{ .name = name, .body = body } };
     }
 
     /// Parses an if statement with optional else-if chains:
@@ -491,11 +479,11 @@ pub const Parser = struct {
         var else_body: ?[]const u8 = null;
 
         while (self.pos < self.tokens.len) {
-            if (self.isOp("else")) {
+            if (self.isKeyword("else")) {
                 _ = self.advance(); // consume 'else'
                 self.skipSeparators();
 
-                if (self.isOp("if")) {
+                if (self.isKeyword("if")) {
                     // else if - parse another branch
                     _ = self.advance(); // consume 'if'
                     const branch = try self.parseIfBranch();
@@ -506,7 +494,7 @@ pub const Parser = struct {
                     try self.consumeEnd();
                     break;
                 }
-            } else if (self.isOp("end")) {
+            } else if (self.isKeyword("end")) {
                 try self.consumeEnd();
                 break;
             } else {
@@ -514,10 +502,10 @@ pub const Parser = struct {
             }
         }
 
-        return .{ .kind = .{ .@"if" = .{
+        return .{ .@"if" = .{
             .branches = try branches.toOwnedSlice(self.allocator),
             .else_body = else_body,
-        } } };
+        } };
     }
 
     /// Parses a single if/else-if branch (condition + body).
@@ -549,7 +537,7 @@ pub const Parser = struct {
         const first_word_tok = self.advance().?;
         self.skipSeparators();
 
-        const variable: []const u8 = if (self.isOp("in")) blk: {
+        const variable: []const u8 = if (self.isKeyword("in")) blk: {
             // `var in items` form - extract variable name
             _ = self.advance(); // consume 'in'
             self.skipSeparators();
@@ -564,11 +552,11 @@ pub const Parser = struct {
         const body = try self.captureBlockBody(&.{}, ParseError.UnterminatedEach);
         try self.consumeEnd();
 
-        return .{ .kind = .{ .each = .{
+        return .{ .each = .{
             .variable = variable,
             .items_source = items_source,
             .body = body,
-        } } };
+        } };
     }
 
     /// Parses a while loop: `while condition ... end`
@@ -580,7 +568,7 @@ pub const Parser = struct {
         const body = try self.captureBlockBody(&.{}, ParseError.UnterminatedWhile);
         try self.consumeEnd();
 
-        return .{ .kind = .{ .@"while" = .{ .condition = condition, .body = body } } };
+        return .{ .@"while" = .{ .condition = condition, .body = body } };
     }
 
     // =========================================================================
@@ -591,7 +579,7 @@ pub const Parser = struct {
     fn parseReturnStatement(self: *Parser) Statement {
         _ = self.advance(); // consume 'return'
         const status = if (self.isWord()) self.captureWord() else null;
-        return .{ .kind = .{ .@"return" = status } };
+        return .{ .@"return" = status };
     }
 
     /// Captures a single word token as trimmed source text.
@@ -609,13 +597,13 @@ pub const Parser = struct {
             _ = self.advance();
         }
         const cmd_source = std.mem.trim(u8, self.extractSourceRange(start, self.pos), " \t\n");
-        return .{ .kind = .{ .@"defer" = cmd_source } };
+        return .{ .@"defer" = cmd_source };
     }
 
     /// Parses an output capture (=> or =>@).
     fn parseCapture(self: *Parser) ParseError!Capture {
         const op = self.advance().?.kind.operator;
-        const mode: CaptureMode = if (std.mem.eql(u8, op, "=>@")) .lines else .string;
+        const mode: CaptureMode = if (op == .capture_lines) .lines else .string;
 
         if (!self.isWord()) return ParseError.InvalidCapture;
         const name = extractSimpleWord(self.advance().?) orelse return ParseError.InvalidCapture;
@@ -626,43 +614,45 @@ pub const Parser = struct {
     /// Parses a single statement (command, control flow, or function definition).
     fn parseStatement(self: *Parser) ParseError!?Statement {
         // Control flow and function definitions
-        if (self.isOp("fun")) return try self.parseFunctionDefinition();
-        if (self.isOp("if")) return try self.parseIfStatement();
-        if (self.isOp("each") or self.isOp("for")) return try self.parseEachStatement();
-        if (self.isOp("while")) return try self.parseWhileStatement();
+        if (self.isKeyword("fun")) return try self.parseFunctionDefinition();
+        if (self.isKeyword("if")) return try self.parseIfStatement();
+        if (self.isKeyword("each") or self.isKeyword("for")) return try self.parseEachStatement();
+        if (self.isKeyword("while")) return try self.parseWhileStatement();
 
         // Simple statements
-        if (self.isOp("break")) {
+        if (self.isKeyword("break")) {
             _ = self.advance();
-            return .{ .kind = .@"break" };
+            return .@"break";
         }
-        if (self.isOp("continue")) {
+        if (self.isKeyword("continue")) {
             _ = self.advance();
-            return .{ .kind = .@"continue" };
+            return .@"continue";
         }
-        if (self.isOp("return")) return self.parseReturnStatement();
-        if (self.isOp("defer")) return self.parseDeferStatement();
+        if (self.isKeyword("return")) return self.parseReturnStatement();
+        if (self.isKeyword("defer")) return self.parseDeferStatement();
 
         // Command statement
         const chains = try self.parseLogical() orelse return null;
         var background = false;
         var capture: ?Capture = null;
 
-        if (self.isOp("&")) {
+        if (self.isOperator(.background)) {
             background = true;
             _ = self.advance();
         }
 
-        if (self.isOp("=>") or self.isOp("=>@")) {
-            if (background) return ParseError.CaptureWithBackground;
-            capture = try self.parseCapture();
+        if (self.peekOperator()) |op| {
+            if (op.isCapture()) {
+                if (background) return ParseError.CaptureWithBackground;
+                capture = try self.parseCapture();
+            }
         }
 
-        return .{ .kind = .{ .command = .{
+        return .{ .command = .{
             .background = background,
             .capture = capture,
             .chains = chains,
-        } } };
+        } };
     }
 
     // =========================================================================
@@ -715,7 +705,7 @@ test "Commands: simple command" {
     const prog = try parseTestNoSource(&arena, "echo hello");
 
     try testing.expectEqual(@as(usize, 1), prog.statements.len);
-    const cmd_stmt = prog.statements[0].kind.command;
+    const cmd_stmt = prog.statements[0].command;
     try testing.expectEqual(false, cmd_stmt.background);
     try testing.expectEqual(@as(?Capture, null), cmd_stmt.capture);
     try testing.expectEqual(@as(usize, 1), cmd_stmt.chains.len);
@@ -731,7 +721,7 @@ test "Commands: pipeline" {
     const prog = try parseTestNoSource(&arena, "cat file | grep foo | wc -l");
 
     try testing.expectEqual(@as(usize, 1), prog.statements.len);
-    const pipeline = prog.statements[0].kind.command.chains[0].pipeline;
+    const pipeline = prog.statements[0].command.chains[0].pipeline;
     try testing.expectEqual(@as(usize, 3), pipeline.commands.len);
 }
 
@@ -742,7 +732,7 @@ test "Commands: background execution" {
     const prog = try parseTestNoSource(&arena, "sleep 10 &");
 
     try testing.expectEqual(@as(usize, 1), prog.statements.len);
-    try testing.expectEqual(true, prog.statements[0].kind.command.background);
+    try testing.expectEqual(true, prog.statements[0].command.background);
 }
 
 test "Capture: string mode (=>)" {
@@ -752,7 +742,7 @@ test "Capture: string mode (=>)" {
     const prog = try parseTestNoSource(&arena, "whoami => user");
 
     try testing.expectEqual(@as(usize, 1), prog.statements.len);
-    if (prog.statements[0].kind.command.capture) |cap| {
+    if (prog.statements[0].command.capture) |cap| {
         try testing.expectEqual(CaptureMode.string, cap.mode);
         try testing.expectEqualStrings("user", cap.variable);
     } else {
@@ -767,7 +757,7 @@ test "Capture: lines mode (=>@)" {
     const prog = try parseTestNoSource(&arena, "ls =>@ files");
 
     try testing.expectEqual(@as(usize, 1), prog.statements.len);
-    if (prog.statements[0].kind.command.capture) |cap| {
+    if (prog.statements[0].command.capture) |cap| {
         try testing.expectEqual(CaptureMode.lines, cap.mode);
         try testing.expectEqualStrings("files", cap.variable);
     } else {
@@ -782,7 +772,7 @@ test "Logical: && and || operators" {
     const prog = try parseTestNoSource(&arena, "true && echo ok || echo fail");
 
     try testing.expectEqual(@as(usize, 1), prog.statements.len);
-    const cmd_stmt = prog.statements[0].kind.command;
+    const cmd_stmt = prog.statements[0].command;
     try testing.expectEqual(@as(usize, 3), cmd_stmt.chains.len);
     try testing.expectEqual(ast.ChainOperator.none, cmd_stmt.chains[0].op);
     try testing.expectEqual(ast.ChainOperator.@"and", cmd_stmt.chains[1].op);
@@ -795,7 +785,7 @@ test "Redirections: input and output" {
 
     const prog = try parseTestNoSource(&arena, "cat < in.txt > out.txt");
 
-    const cmd = prog.statements[0].kind.command.chains[0].pipeline.commands[0];
+    const cmd = prog.statements[0].command.chains[0].pipeline.commands[0];
     try testing.expectEqual(@as(usize, 2), cmd.redirects.len);
 
     // Input redirect
@@ -827,7 +817,7 @@ test "Redirections: quoted path with spaces" {
 
     const prog = try parseTestNoSource(&arena, "echo test > \"foo bar.txt\"");
 
-    const cmd = prog.statements[0].kind.command.chains[0].pipeline.commands[0];
+    const cmd = prog.statements[0].command.chains[0].pipeline.commands[0];
     try testing.expectEqual(@as(usize, 1), cmd.redirects.len);
 
     const r = cmd.redirects[0];
@@ -848,7 +838,7 @@ test "Redirections: single-quoted path preserves literal" {
 
     const prog = try parseTestNoSource(&arena, "echo test > '$var.txt'");
 
-    const cmd = prog.statements[0].kind.command.chains[0].pipeline.commands[0];
+    const cmd = prog.statements[0].command.chains[0].pipeline.commands[0];
     try testing.expectEqual(@as(usize, 1), cmd.redirects.len);
 
     const r = cmd.redirects[0];
@@ -868,7 +858,7 @@ test "Redirections: variable in path" {
 
     const prog = try parseTestNoSource(&arena, "echo test > $outfile");
 
-    const cmd = prog.statements[0].kind.command.chains[0].pipeline.commands[0];
+    const cmd = prog.statements[0].command.chains[0].pipeline.commands[0];
     try testing.expectEqual(@as(usize, 1), cmd.redirects.len);
 
     const r = cmd.redirects[0];
@@ -888,7 +878,7 @@ test "Assignments: environment prefix" {
 
     const prog = try parseTestNoSource(&arena, "FOO=bar env");
 
-    const cmd = prog.statements[0].kind.command.chains[0].pipeline.commands[0];
+    const cmd = prog.statements[0].command.chains[0].pipeline.commands[0];
     try testing.expectEqual(@as(usize, 1), cmd.assignments.len);
     try testing.expectEqualStrings("FOO", cmd.assignments[0].key);
 }
@@ -901,7 +891,7 @@ test "Functions: basic definition" {
     const prog = try parseTest(&arena, input);
 
     try testing.expectEqual(@as(usize, 1), prog.statements.len);
-    const fun_def = prog.statements[0].kind.function;
+    const fun_def = prog.statements[0].function;
     try testing.expectEqualStrings("greet", fun_def.name);
     try testing.expect(std.mem.indexOf(u8, fun_def.body, "echo hello") != null);
 }
@@ -914,7 +904,7 @@ test "Functions: inline definition" {
     const prog = try parseTest(&arena, input);
 
     try testing.expectEqual(@as(usize, 1), prog.statements.len);
-    const fun_def = prog.statements[0].kind.function;
+    const fun_def = prog.statements[0].function;
     try testing.expectEqualStrings("greet", fun_def.name);
     try testing.expect(std.mem.indexOf(u8, fun_def.body, "echo hello") != null);
 }
@@ -927,7 +917,7 @@ test "Functions: nested definitions" {
     const prog = try parseTest(&arena, input);
 
     try testing.expectEqual(@as(usize, 1), prog.statements.len);
-    const fun_def = prog.statements[0].kind.function;
+    const fun_def = prog.statements[0].function;
     try testing.expectEqualStrings("outer", fun_def.name);
     // Body should contain the nested fun...end
     try testing.expect(std.mem.indexOf(u8, fun_def.body, "fun inner") != null);
@@ -966,7 +956,7 @@ test "If: simple statement" {
     const prog = try parseTest(&arena, input);
 
     try testing.expectEqual(@as(usize, 1), prog.statements.len);
-    const @"if" = prog.statements[0].kind.@"if";
+    const @"if" = prog.statements[0].@"if";
     try testing.expectEqual(@as(usize, 1), @"if".branches.len);
     try testing.expectEqualStrings("true", @"if".branches[0].condition);
     try testing.expect(std.mem.indexOf(u8, @"if".branches[0].body, "echo yes") != null);
@@ -981,7 +971,7 @@ test "If: with else" {
     const prog = try parseTest(&arena, input);
 
     try testing.expectEqual(@as(usize, 1), prog.statements.len);
-    const @"if" = prog.statements[0].kind.@"if";
+    const @"if" = prog.statements[0].@"if";
     try testing.expectEqual(@as(usize, 1), @"if".branches.len);
     try testing.expectEqualStrings("false", @"if".branches[0].condition);
     try testing.expect(std.mem.indexOf(u8, @"if".branches[0].body, "echo no") != null);
@@ -997,7 +987,7 @@ test "If: inline statement" {
     const prog = try parseTest(&arena, input);
 
     try testing.expectEqual(@as(usize, 1), prog.statements.len);
-    const @"if" = prog.statements[0].kind.@"if";
+    const @"if" = prog.statements[0].@"if";
     try testing.expectEqual(@as(usize, 1), @"if".branches.len);
     try testing.expectEqualStrings("true", @"if".branches[0].condition);
     try testing.expect(std.mem.indexOf(u8, @"if".branches[0].body, "echo yes") != null);
@@ -1011,7 +1001,7 @@ test "If: nested statements" {
     const prog = try parseTest(&arena, input);
 
     try testing.expectEqual(@as(usize, 1), prog.statements.len);
-    const @"if" = prog.statements[0].kind.@"if";
+    const @"if" = prog.statements[0].@"if";
     try testing.expectEqual(@as(usize, 1), @"if".branches.len);
     try testing.expectEqualStrings("true", @"if".branches[0].condition);
     // Body should contain the nested if...end
@@ -1027,7 +1017,7 @@ test "If: else-if chain" {
     const prog = try parseTest(&arena, input);
 
     try testing.expectEqual(@as(usize, 1), prog.statements.len);
-    const @"if" = prog.statements[0].kind.@"if";
+    const @"if" = prog.statements[0].@"if";
     try testing.expectEqual(@as(usize, 2), @"if".branches.len);
     try testing.expectEqualStrings("test $x -eq 1", @"if".branches[0].condition);
     try testing.expect(std.mem.indexOf(u8, @"if".branches[0].body, "echo one") != null);
@@ -1045,7 +1035,7 @@ test "If: else-if without final else" {
     const prog = try parseTest(&arena, input);
 
     try testing.expectEqual(@as(usize, 1), prog.statements.len);
-    const @"if" = prog.statements[0].kind.@"if";
+    const @"if" = prog.statements[0].@"if";
     try testing.expectEqual(@as(usize, 2), @"if".branches.len);
     try testing.expectEqual(@as(?[]const u8, null), @"if".else_body);
 }
@@ -1070,7 +1060,7 @@ test "While: simple statement" {
     const prog = try parseTest(&arena, input);
 
     try testing.expectEqual(@as(usize, 1), prog.statements.len);
-    const while_stmt = prog.statements[0].kind.@"while";
+    const while_stmt = prog.statements[0].@"while";
     try testing.expectEqualStrings("test -f file", while_stmt.condition);
     try testing.expect(std.mem.indexOf(u8, while_stmt.body, "sleep 1") != null);
 }
@@ -1083,7 +1073,7 @@ test "While: inline statement" {
     const prog = try parseTest(&arena, input);
 
     try testing.expectEqual(@as(usize, 1), prog.statements.len);
-    const while_stmt = prog.statements[0].kind.@"while";
+    const while_stmt = prog.statements[0].@"while";
     try testing.expectEqualStrings("true", while_stmt.condition);
     try testing.expect(std.mem.indexOf(u8, while_stmt.body, "echo loop") != null);
 }
@@ -1096,7 +1086,7 @@ test "While: nested in if" {
     const prog = try parseTest(&arena, input);
 
     try testing.expectEqual(@as(usize, 1), prog.statements.len);
-    const @"if" = prog.statements[0].kind.@"if";
+    const @"if" = prog.statements[0].@"if";
     try testing.expectEqual(@as(usize, 1), @"if".branches.len);
     // Body should contain the nested while...end
     try testing.expect(std.mem.indexOf(u8, @"if".branches[0].body, "while false") != null);
@@ -1121,7 +1111,7 @@ test "Control: break statement" {
     const prog = try parseTest(&arena, "break");
 
     try testing.expectEqual(@as(usize, 1), prog.statements.len);
-    try testing.expect(prog.statements[0].kind == .@"break");
+    try testing.expect(prog.statements[0] == .@"break");
 }
 
 test "Control: continue statement" {
@@ -1131,7 +1121,7 @@ test "Control: continue statement" {
     const prog = try parseTest(&arena, "continue");
 
     try testing.expectEqual(@as(usize, 1), prog.statements.len);
-    try testing.expect(prog.statements[0].kind == .@"continue");
+    try testing.expect(prog.statements[0] == .@"continue");
 }
 
 test "Return: without argument" {
@@ -1141,8 +1131,8 @@ test "Return: without argument" {
     const prog = try parseTest(&arena, "return");
 
     try testing.expectEqual(@as(usize, 1), prog.statements.len);
-    try testing.expect(prog.statements[0].kind == .@"return");
-    try testing.expectEqual(@as(?[]const u8, null), prog.statements[0].kind.@"return");
+    try testing.expect(prog.statements[0] == .@"return");
+    try testing.expectEqual(@as(?[]const u8, null), prog.statements[0].@"return");
 }
 
 test "Return: with status" {
@@ -1152,8 +1142,8 @@ test "Return: with status" {
     const prog = try parseTest(&arena, "return 1");
 
     try testing.expectEqual(@as(usize, 1), prog.statements.len);
-    try testing.expect(prog.statements[0].kind == .@"return");
-    try testing.expectEqualStrings("1", prog.statements[0].kind.@"return".?);
+    try testing.expect(prog.statements[0] == .@"return");
+    try testing.expectEqualStrings("1", prog.statements[0].@"return".?);
 }
 
 test "Return: with zero" {
@@ -1163,8 +1153,8 @@ test "Return: with zero" {
     const prog = try parseTest(&arena, "return 0");
 
     try testing.expectEqual(@as(usize, 1), prog.statements.len);
-    try testing.expect(prog.statements[0].kind == .@"return");
-    try testing.expectEqualStrings("0", prog.statements[0].kind.@"return".?);
+    try testing.expect(prog.statements[0] == .@"return");
+    try testing.expectEqualStrings("0", prog.statements[0].@"return".?);
 }
 
 test "Return: with variable" {
@@ -1174,8 +1164,8 @@ test "Return: with variable" {
     const prog = try parseTest(&arena, "return $status");
 
     try testing.expectEqual(@as(usize, 1), prog.statements.len);
-    try testing.expect(prog.statements[0].kind == .@"return");
-    try testing.expectEqualStrings("$status", prog.statements[0].kind.@"return".?);
+    try testing.expect(prog.statements[0] == .@"return");
+    try testing.expectEqualStrings("$status", prog.statements[0].@"return".?);
 }
 
 test "Defer: simple command" {
@@ -1185,8 +1175,8 @@ test "Defer: simple command" {
     const prog = try parseTest(&arena, "defer rm -rf $tmpdir");
 
     try testing.expectEqual(@as(usize, 1), prog.statements.len);
-    try testing.expect(prog.statements[0].kind == .@"defer");
-    try testing.expectEqualStrings("rm -rf $tmpdir", prog.statements[0].kind.@"defer");
+    try testing.expect(prog.statements[0] == .@"defer");
+    try testing.expectEqualStrings("rm -rf $tmpdir", prog.statements[0].@"defer");
 }
 
 test "Defer: in function" {
@@ -1197,7 +1187,7 @@ test "Defer: in function" {
     const prog = try parseTest(&arena, input);
 
     try testing.expectEqual(@as(usize, 1), prog.statements.len);
-    const fun_def = prog.statements[0].kind.function;
+    const fun_def = prog.statements[0].function;
     try testing.expectEqualStrings("cleanup", fun_def.name);
     try testing.expect(std.mem.indexOf(u8, fun_def.body, "defer echo done") != null);
 }
@@ -1214,7 +1204,7 @@ test "Each: basic with implicit item" {
     const prog = try parseTest(&arena, input);
 
     try testing.expectEqual(@as(usize, 1), prog.statements.len);
-    const each_stmt = prog.statements[0].kind.each;
+    const each_stmt = prog.statements[0].each;
     try testing.expectEqualStrings("item", each_stmt.variable);
     try testing.expectEqualStrings("a b c", each_stmt.items_source);
     try testing.expect(std.mem.indexOf(u8, each_stmt.body, "echo $item") != null);
@@ -1228,7 +1218,7 @@ test "Each: with explicit variable" {
     const prog = try parseTest(&arena, input);
 
     try testing.expectEqual(@as(usize, 1), prog.statements.len);
-    const each_stmt = prog.statements[0].kind.each;
+    const each_stmt = prog.statements[0].each;
     try testing.expectEqualStrings("x", each_stmt.variable);
     try testing.expectEqualStrings("1 2 3", each_stmt.items_source);
 }
@@ -1241,7 +1231,7 @@ test "Each: inline statement" {
     const prog = try parseTest(&arena, input);
 
     try testing.expectEqual(@as(usize, 1), prog.statements.len);
-    const each_stmt = prog.statements[0].kind.each;
+    const each_stmt = prog.statements[0].each;
     try testing.expectEqualStrings("item", each_stmt.variable);
 }
 
@@ -1253,7 +1243,7 @@ test "Each: for keyword alias with implicit item" {
     const prog = try parseTest(&arena, input);
 
     try testing.expectEqual(@as(usize, 1), prog.statements.len);
-    const each_stmt = prog.statements[0].kind.each;
+    const each_stmt = prog.statements[0].each;
     try testing.expectEqualStrings("item", each_stmt.variable);
     try testing.expectEqualStrings("a b c", each_stmt.items_source);
 }
@@ -1266,7 +1256,7 @@ test "Each: for keyword alias with explicit variable" {
     const prog = try parseTest(&arena, input);
 
     try testing.expectEqual(@as(usize, 1), prog.statements.len);
-    const each_stmt = prog.statements[0].kind.each;
+    const each_stmt = prog.statements[0].each;
     try testing.expectEqualStrings("x", each_stmt.variable);
     try testing.expectEqualStrings("1 2 3", each_stmt.items_source);
 }
@@ -1279,7 +1269,7 @@ test "Each: nested" {
     const prog = try parseTest(&arena, input);
 
     try testing.expectEqual(@as(usize, 1), prog.statements.len);
-    const each_stmt = prog.statements[0].kind.each;
+    const each_stmt = prog.statements[0].each;
     try testing.expect(std.mem.indexOf(u8, each_stmt.body, "each 1 2") != null);
 }
 

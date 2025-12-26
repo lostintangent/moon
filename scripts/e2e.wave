@@ -295,7 +295,7 @@ test_case "Pipe to head" "printf '1\n2\n3\n4\n' | head -n 1" "1"
 # ============================================================================
 # Output Capture
 # ============================================================================
-print_header "Output Capture (6 tests)"
+print_header "Output Capture (12 tests)"
 
 test_case "String capture =>" "echo hello => x; echo \$x" "hello"
 test_case "Capture to new var" "echo world => greeting; echo \$greeting" "world"
@@ -303,6 +303,16 @@ test_case "Capture empty" "echo => x; echo [\$x]" "[]"
 test_case "Capture multi-word" "echo one two three => words; echo \$words" "one two three"
 test_case "Capture command output" "= 2 + 3 => result; echo \$result" "5"
 test_case "Multiple captures" "echo a => x; echo b => y; echo \$x \$y" "a b"
+
+# Stderr capture (=> captures both stdout and stderr)
+test_case "Capture stderr" "sh -c 'echo error >&2' => output; echo \$output" "error"
+test_case "Capture stdout and stderr" "sh -c 'echo out; echo err >&2' => output; echo \$output" "out\nerr"
+test_case "Capture only stderr when no stdout" "sh -c 'echo warning >&2' => msg; echo \$msg" "warning"
+test_case "Capture interleaved stdout/stderr" "sh -c 'echo a; echo b >&2; echo c' => result; echo \$result" "a\nb\nc"
+
+# Stderr redirect to /dev/null (only stdout captured)
+test_case "Capture stdout with stderr to /dev/null" "sh -c 'echo out; echo err >&2' 2>/dev/null => output; echo \$output" "out"
+test_case "Capture only stdout when stderr discarded" "sh -c 'echo keep; echo discard >&2' 2>/dev/null => result; echo \$result" "keep"
 
 # ============================================================================
 # Logical Operators

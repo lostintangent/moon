@@ -6,6 +6,8 @@
 //!   - `TokenSpan`: The source position of the token (byte indices) in the script/command
 //! - `WordPart`: A segment of a word token with its quoting context
 //!       (e.g., `hello"world"` produces two WordParts: one unquoted, one double-quoted)
+//! - `Operator`: Enum of all shell operators (pipes, redirects, logical, capture, background)
+//! - `Separator`: Enum of command separators (newline, semicolon)
 //!
 //! ## Keywords
 //!
@@ -15,11 +17,8 @@
 //! Additionally, quoting escapes keyword interpretation: `"if"` is always a word.
 //! The parser determines keyword semantics based on position; the lexer just
 //! produces generic word tokens.
-//!
-//! Also provides operator/keyword tables for O(1) lookups.
 
 const std = @import("std");
-const ast = @import("ast.zig");
 
 /// Indicates how a word segment was quoted in the source.
 /// Used by the expander to determine which expansions apply:
@@ -84,10 +83,77 @@ pub const TokenSpan = struct {
     }
 };
 
+/// Shell operators recognized by the lexer.
+/// Ordered conceptually by category for clarity.
+pub const Operator = enum {
+    // Pipe operators
+    pipe, // |
+    pipe_arrow, // |>
+
+    // Logical operators
+    @"and", // &&
+    @"or", // ||
+
+    // Redirect operators
+    redirect_stdin, // <
+    redirect_stdout, // >
+    redirect_stdout_append, // >>
+    redirect_stderr, // 2>
+    redirect_stderr_append, // 2>>
+    redirect_both, // &>
+    redirect_stderr_to_stdout, // 2>&1
+
+    // Capture operators
+    capture, // =>
+    capture_lines, // =>@
+
+    // Background
+    background, // &
+
+    /// Returns the character length of this operator in source text.
+    pub fn len(self: Operator) usize {
+        return switch (self) {
+            .redirect_stderr_to_stdout => 4, // 2>&1
+            .capture_lines, .redirect_stderr_append => 3, // =>@, 2>>
+            .pipe_arrow, .@"and", .@"or", .capture, .redirect_stdout_append, .redirect_stderr, .redirect_both => 2,
+            .pipe, .redirect_stdin, .redirect_stdout, .background => 1,
+        };
+    }
+
+    /// Returns true if this operator is a redirection operator.
+    pub fn isRedirect(self: Operator) bool {
+        return switch (self) {
+            .redirect_stdin, .redirect_stdout, .redirect_stdout_append, .redirect_stderr, .redirect_stderr_append, .redirect_both, .redirect_stderr_to_stdout => true,
+            else => false,
+        };
+    }
+
+    /// Returns true if this operator is a pipe operator.
+    pub fn isPipe(self: Operator) bool {
+        return self == .pipe or self == .pipe_arrow;
+    }
+
+    /// Returns true if this operator is a logical operator.
+    pub fn isLogical(self: Operator) bool {
+        return self == .@"and" or self == .@"or";
+    }
+
+    /// Returns true if this operator is a capture operator.
+    pub fn isCapture(self: Operator) bool {
+        return self == .capture or self == .capture_lines;
+    }
+};
+
+/// Command separators.
+pub const Separator = enum {
+    newline, // \n
+    semicolon, // ;
+};
+
 pub const TokenKind = union(enum) {
     word: []const WordPart,
-    operator: []const u8,
-    separator: []const u8,
+    operator: Operator,
+    separator: Separator,
 };
 
 pub const Token = struct {
@@ -98,19 +164,13 @@ pub const Token = struct {
         return .{ .kind = .{ .word = word_parts }, .span = tok_span };
     }
 
-    pub fn initOp(op_text: []const u8, tok_span: TokenSpan) Token {
-        return .{ .kind = .{ .operator = op_text }, .span = tok_span };
+    pub fn initOp(op: Operator, tok_span: TokenSpan) Token {
+        return .{ .kind = .{ .operator = op }, .span = tok_span };
     }
 
-    pub fn initSep(sep_text: []const u8, tok_span: TokenSpan) Token {
-        return .{ .kind = .{ .separator = sep_text }, .span = tok_span };
+    pub fn initSep(sep: Separator, tok_span: TokenSpan) Token {
+        return .{ .kind = .{ .separator = sep }, .span = tok_span };
     }
-};
-
-/// Operators recognized by the lexer, ordered by descending length so longer
-/// operators match first (e.g., "2>&1" must precede "2>" to avoid premature matching).
-pub const operators = [_][]const u8{
-    "2>&1", "=>@", "2>>", "&>", "|>", "&&", "||", "=>", "2>", ">>", "|", "&", "<", ">",
 };
 
 /// Helper to create a compile-time string set from a simple list of strings.
@@ -128,31 +188,6 @@ fn stringSet(comptime strings: []const []const u8) std.StaticStringMap(void) {
 const keywords = stringSet(&.{ "and", "or", "fun", "end", "if", "else", "for", "each", "in", "while", "break", "continue", "return", "defer" });
 pub fn isKeyword(word: []const u8) bool {
     return keywords.has(word);
-}
-
-const redirect_operators = stringSet(&.{ "<", ">", ">>", "2>", "2>>", "&>", "2>&1" });
-pub fn isRedirectOperator(text: []const u8) bool {
-    return redirect_operators.has(text);
-}
-
-const pipe_operators = stringSet(&.{ "|", "|>" });
-pub fn isPipeOperator(text: []const u8) bool {
-    return pipe_operators.has(text);
-}
-
-const logical_operators = stringSet(&.{ "and", "or", "&&", "||" });
-pub fn isLogicalOperator(text: []const u8) bool {
-    return logical_operators.has(text);
-}
-
-/// Parses a logical operator string and returns its ChainOperator type.
-/// Returns null if the text is not a logical operator.
-pub fn parseLogicalOperator(text: []const u8) ?ast.ChainOperator {
-    if (!logical_operators.has(text)) return null;
-    return if (std.mem.eql(u8, text, "and") or std.mem.eql(u8, text, "&&"))
-        .@"and"
-    else
-        .@"or";
 }
 
 /// Returns true if `c` is a valid identifier character (alphanumeric or underscore).

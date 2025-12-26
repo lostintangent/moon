@@ -52,7 +52,7 @@ pub fn execute(allocator: std.mem.Allocator, state: *State, prog: ast.Program, c
 }
 
 pub fn executeStatement(allocator: std.mem.Allocator, state: *State, stmt: ast.Statement, cmd_str: []const u8) !u8 {
-    return switch (stmt.kind) {
+    return switch (stmt) {
         .command => |cmd_stmt| try executeCmdStatement(allocator, state, cmd_stmt, cmd_str),
         .function => |fun_def| {
             // Register the function in state

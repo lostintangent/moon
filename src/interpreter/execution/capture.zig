@@ -1,6 +1,6 @@
 //! Subprocess output capture utilities.
 //!
-//! Provides `forkWithPipe()` for capturing stdout from a child process.
+//! Provides `forkWithPipe()` for capturing stdout and stderr from a child process.
 //! Used by:
 //! - Output capture operators (`=>`, `=>@`)
 //! - Command substitution `$(...)`
@@ -21,7 +21,7 @@ pub const CaptureResult = struct {
 
 /// Result of forkWithPipe - tells caller which process they're in.
 pub const ForkResult = union(enum) {
-    /// We're in the child - stdout is redirected to the pipe.
+    /// We're in the child - stdout and stderr are redirected to the pipe.
     /// Run your code and call std.posix.exit() when done.
     child: void,
 
@@ -67,22 +67,22 @@ pub const ParentHandle = struct {
     }
 };
 
-/// Fork a child process with stdout redirected to a pipe.
+/// Fork a child process with stdout and stderr redirected to a pipe.
 ///
-/// Returns `.child` in the child process (stdout already redirected),
+/// Returns `.child` in the child process (stdout and stderr already redirected),
 /// or `.parent` with a handle to read the output and wait.
 ///
 /// Usage:
 /// ```zig
 /// switch (try process.forkWithPipe()) {
 ///     .child => {
-///         // Run code that writes to stdout
+///         // Run code that writes to stdout/stderr
 ///         const status = doWork();
 ///         std.posix.exit(status);
 ///     },
 ///     .parent => |handle| {
 ///         const result = try handle.readAndWait(allocator);
-///         // result.output contains captured stdout
+///         // result.output contains captured stdout and stderr
 ///         // result.status contains exit code
 ///     },
 /// }
@@ -94,9 +94,10 @@ pub fn forkWithPipe() !ForkResult {
 
     const pid = try std.posix.fork();
     if (pid == 0) {
-        // Child: redirect stdout to pipe
+        // Child: redirect stdout and stderr to pipe
         std.posix.close(read_fd);
         std.posix.dup2(write_fd, std.posix.STDOUT_FILENO) catch std.posix.exit(1);
+        std.posix.dup2(write_fd, std.posix.STDERR_FILENO) catch std.posix.exit(1);
         std.posix.close(write_fd);
         return .child;
     }

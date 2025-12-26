@@ -4,12 +4,12 @@
 //! 1. Skip whitespace (spaces, tabs)
 //! 2. Skip comments (`#` to end of line)
 //! 3. Read separator tokens (newline, semicolon)
-//! 4. Read operator tokens (longest match first: `&&`, `|>`, `=>`, etc.)
+//! 4. Read operator tokens (longest match first: `2>&1`, `=>@`, `&&`, etc.)
 //! 5. Read word tokens (bare words, quoted strings, command substitutions)
 //!
 //! Operators are checked before words so that `|>foo` tokenizes as `|>` + `foo`,
-//! not as a single word. The operator list in tokens.zig is ordered by length
-//! (descending) to ensure longest-match-first behavior.
+//! not as a single word. Operators are checked longest-first in `peekOperator`
+//! to ensure correct matching (e.g., `2>&1` before `2>`).
 //!
 //! Each token includes a `TokenSpan` with source location for error reporting.
 
@@ -20,6 +20,8 @@ const Token = token_types.Token;
 const WordPart = token_types.WordPart;
 const QuoteKind = token_types.QuoteKind;
 const TokenSpan = token_types.TokenSpan;
+const Operator = token_types.Operator;
+const Separator = token_types.Separator;
 
 pub const LexError = error{
     UnterminatedString,
@@ -107,13 +109,33 @@ pub const Lexer = struct {
     // Operator handling
     // =========================================================================
 
+    /// Checks if the input at current position matches the given string.
+    inline fn matchesStr(self: *const Lexer, s: []const u8) bool {
+        const slice = self.peekSlice(s.len) orelse return false;
+        return std.mem.eql(u8, slice, s);
+    }
+
     /// Checks if an operator starts at the current position. Returns the operator or null.
-    fn peekOperator(self: *const Lexer) ?[]const u8 {
-        for (token_types.operators) |op| {
-            if (self.peekSlice(op.len)) |s| {
-                if (std.mem.eql(u8, s, op)) return op;
-            }
-        }
+    /// Operators are checked longest-first to ensure correct matching (e.g., "2>&1" before "2>").
+    fn peekOperator(self: *const Lexer) ?Operator {
+        // 4-character operators
+        if (self.matchesStr("2>&1")) return .redirect_stderr_to_stdout;
+        // 3-character operators
+        if (self.matchesStr("=>@")) return .capture_lines;
+        if (self.matchesStr("2>>")) return .redirect_stderr_append;
+        // 2-character operators
+        if (self.matchesStr("&>")) return .redirect_both;
+        if (self.matchesStr("|>")) return .pipe_arrow;
+        if (self.matchesStr("&&")) return .@"and";
+        if (self.matchesStr("||")) return .@"or";
+        if (self.matchesStr("=>")) return .capture;
+        if (self.matchesStr("2>")) return .redirect_stderr;
+        if (self.matchesStr(">>")) return .redirect_stdout_append;
+        // 1-character operators
+        if (self.matchesStr("|")) return .pipe;
+        if (self.matchesStr("&")) return .background;
+        if (self.matchesStr("<")) return .redirect_stdin;
+        if (self.matchesStr(">")) return .redirect_stdout;
         return null;
     }
 
@@ -121,7 +143,7 @@ pub const Lexer = struct {
     fn tryReadOperator(self: *Lexer, tokens: *std.ArrayListUnmanaged(Token)) error{OutOfMemory}!bool {
         const op = self.peekOperator() orelse return false;
         const start = self.pos;
-        self.advanceBy(op.len);
+        self.advanceBy(op.len());
         try tokens.append(self.allocator, Token.initOp(op, self.makeSpan(start)));
         return true;
     }
@@ -130,7 +152,7 @@ pub const Lexer = struct {
     fn tryReadSeparator(self: *Lexer, tokens: *std.ArrayListUnmanaged(Token)) error{OutOfMemory}!bool {
         const c = self.peek() orelse return false;
         if (!token_types.isSeparator(c)) return false;
-        const sep: []const u8 = if (c == '\n') "\n" else ";";
+        const sep: Separator = if (c == '\n') .newline else .semicolon;
         const start = self.pos;
         self.advance();
         try tokens.append(self.allocator, Token.initSep(sep, self.makeSpan(start)));
@@ -571,7 +593,7 @@ test "Operators: pipe" {
 
     try testing.expectEqual(@as(usize, 5), tokens.len);
     try expectTokenKind(tokens[2], .operator);
-    try testing.expectEqualStrings("|", tokens[2].kind.operator);
+    try testing.expectEqual(Operator.pipe, tokens[2].kind.operator);
 }
 
 test "Operators: pipe arrow" {
@@ -582,7 +604,7 @@ test "Operators: pipe arrow" {
 
     try testing.expectEqual(@as(usize, 5), tokens.len);
     try expectTokenKind(tokens[2], .operator);
-    try testing.expectEqualStrings("|>", tokens[2].kind.operator);
+    try testing.expectEqual(Operator.pipe_arrow, tokens[2].kind.operator);
 }
 
 test "Operators: logical" {
@@ -591,8 +613,8 @@ test "Operators: logical" {
 
     const tokens = try tokenizeTest(&arena, "true && echo ok || echo fail");
 
-    try testing.expectEqualStrings("&&", tokens[1].kind.operator);
-    try testing.expectEqualStrings("||", tokens[4].kind.operator);
+    try testing.expectEqual(Operator.@"and", tokens[1].kind.operator);
+    try testing.expectEqual(Operator.@"or", tokens[4].kind.operator);
 }
 
 test "Operators: text logical as words" {
@@ -617,7 +639,7 @@ test "Operators: background" {
 
     try testing.expectEqual(@as(usize, 5), tokens.len);
     try expectTokenKind(tokens[2], .operator);
-    try testing.expectEqualStrings("&", tokens[2].kind.operator);
+    try testing.expectEqual(Operator.background, tokens[2].kind.operator);
 }
 
 test "Operators: capture" {
@@ -628,7 +650,7 @@ test "Operators: capture" {
 
     try testing.expectEqual(@as(usize, 4), tokens.len);
     try expectTokenKind(tokens[2], .operator);
-    try testing.expectEqualStrings("=>", tokens[2].kind.operator);
+    try testing.expectEqual(Operator.capture, tokens[2].kind.operator);
 }
 
 test "Operators: capture lines" {
@@ -639,7 +661,7 @@ test "Operators: capture lines" {
 
     try testing.expectEqual(@as(usize, 3), tokens.len);
     try expectTokenKind(tokens[1], .operator);
-    try testing.expectEqualStrings("=>@", tokens[1].kind.operator);
+    try testing.expectEqual(Operator.capture_lines, tokens[1].kind.operator);
 }
 
 test "Operators: redirections" {
@@ -649,11 +671,11 @@ test "Operators: redirections" {
     const tokens = try tokenizeTest(&arena, "cmd < in > out >> append 2> err 2>&1");
 
     try testing.expectEqual(@as(usize, 10), tokens.len);
-    try testing.expectEqualStrings("<", tokens[1].kind.operator);
-    try testing.expectEqualStrings(">", tokens[3].kind.operator);
-    try testing.expectEqualStrings(">>", tokens[5].kind.operator);
-    try testing.expectEqualStrings("2>", tokens[7].kind.operator);
-    try testing.expectEqualStrings("2>&1", tokens[9].kind.operator);
+    try testing.expectEqual(Operator.redirect_stdin, tokens[1].kind.operator);
+    try testing.expectEqual(Operator.redirect_stdout, tokens[3].kind.operator);
+    try testing.expectEqual(Operator.redirect_stdout_append, tokens[5].kind.operator);
+    try testing.expectEqual(Operator.redirect_stderr, tokens[7].kind.operator);
+    try testing.expectEqual(Operator.redirect_stderr_to_stdout, tokens[9].kind.operator);
 }
 
 test "Operators: adjacent to word" {
@@ -664,7 +686,7 @@ test "Operators: adjacent to word" {
 
     try testing.expectEqual(@as(usize, 3), tokens.len);
     try expectBareWord(tokens[0].kind.word, "echo");
-    try testing.expectEqualStrings("|", tokens[1].kind.operator);
+    try testing.expectEqual(Operator.pipe, tokens[1].kind.operator);
     try expectBareWord(tokens[2].kind.word, "cat");
 }
 
@@ -686,7 +708,7 @@ test "Separators: newline" {
 
     try testing.expectEqual(@as(usize, 5), tokens.len);
     try expectTokenKind(tokens[2], .separator);
-    try testing.expectEqualStrings("\n", tokens[2].kind.separator);
+    try testing.expectEqual(Separator.newline, tokens[2].kind.separator);
 }
 
 test "Comments: trailing comment" {

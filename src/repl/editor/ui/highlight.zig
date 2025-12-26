@@ -120,7 +120,7 @@ fn collectCommandPositions(
 
     const program = program_ast orelse return positions;
     for (program.statements) |stmt| {
-        const cmd_stmt = switch (stmt.kind) {
+        const cmd_stmt = switch (stmt) {
             .command => |cmd| cmd,
             else => continue,
         };
@@ -186,11 +186,11 @@ fn highlightWord(
 }
 
 /// Get ANSI color code for an operator.
-fn operatorColor(op: []const u8) []const u8 {
-    if (tokens.isPipeOperator(op) or tokens.isRedirectOperator(op)) return ansi.cyan;
-    if (tokens.isLogicalOperator(op)) return ansi.yellow;
-    if (op[0] == '&' or std.mem.startsWith(u8, op, "=>")) return ansi.magenta;
-    unreachable;
+fn operatorColor(op: tokens.Operator) []const u8 {
+    if (op.isPipe() or op.isRedirect()) return ansi.cyan;
+    if (op.isLogical()) return ansi.yellow;
+    // Background (&) and capture (=>, =>@) operators
+    return ansi.magenta;
 }
 
 // =============================================================================

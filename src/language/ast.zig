@@ -176,8 +176,8 @@ pub const CommandStatement = struct {
 // Statements and Program
 // =============================================================================
 
-/// The kind of statement in the AST.
-pub const StatementKind = union(enum) {
+/// A single statement in the AST.
+pub const Statement = union(enum) {
     /// A command statement (may include pipelines, chains, capture)
     command: CommandStatement,
     /// A function definition
@@ -189,19 +189,13 @@ pub const StatementKind = union(enum) {
     /// A while loop
     @"while": WhileStatement,
     /// Break out of the innermost loop
-    @"break": void,
+    @"break",
     /// Continue to next iteration of innermost loop
-    @"continue": void,
+    @"continue",
     /// Return from current function with optional status (raw source, expanded at runtime)
     @"return": ?[]const u8,
     /// Defer a command to run when the current function exits
     @"defer": []const u8,
-};
-
-/// A single statement in the program.
-pub const Statement = struct {
-    /// The kind and data of this statement
-    kind: StatementKind,
 };
 
 /// The top-level AST node representing a complete program.

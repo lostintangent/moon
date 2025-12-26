@@ -6,25 +6,22 @@ print -n --dim "Building Oshen..."
 zig build -Doptimize=ReleaseFast
 terminal clear
 
-fun bench
-    var name $1
-    var cmd $2
+# Alias oshen to point at the built binary (aliases shadow PATH executables)
+alias oshen ./zig-out/bin/oshen
 
-    print --yellow "⏳ $name"
-    time -p sh -c "$cmd > /dev/null 2>&1"
-    
-    # Move up 4 lines (3 from `time -p` + 1 progress) and rewrite
-    terminal save
-    terminal move --up 4
+# Simple list of shell names - command derived from name
+var shells oshen zsh fish elvish
+
+each shells
+    # Skip if shell not available
+    type $item > /dev/null 2>&1 || continue
+
+    print -n --yellow "⏳ $item"
+
+    time -p $item $DIR/script.$item => timing
+
+    # Clear progress line and show results
     terminal clear
-
-    print --green $name
-    
-    terminal restore
-    print
+    print --green $item
+    print $timing --nl
 end
-
-test -x ./zig-out/bin/oshen && bench "Oshen" "./zig-out/bin/oshen $DIR/oshen.wave"
-type zsh > /dev/null 2>&1 && bench "Zsh" "zsh $DIR/zsh.sh"
-type fish > /dev/null 2>&1 && bench "Fish" "fish $DIR/fish.fish"
-type elvish > /dev/null 2>&1 && bench "Elvish" "elvish $DIR/elvish.elv"
