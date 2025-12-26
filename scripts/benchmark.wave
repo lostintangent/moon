@@ -1,38 +1,30 @@
 #!./zig-out/bin/oshen
 
-# Benchmark runner for comparing shell performance
-# Runs each benchmark and reports timing
+var DIR (pwd)/scripts/benchmarks
 
-var BENCHMARKS_DIR (pwd)/scripts/benchmarks
-
-print --nl --blue "Building Oshen..."
+print -n --dim "Building Oshen..."
 zig build -Doptimize=ReleaseFast
+terminal clear
 
-fun run_benchmark
-    print --nl --yellow "Running $1..."
-    time -p sh -c "$2"
+fun bench
+    var name $1
+    var cmd $2
+
+    print --yellow "⏳ $name"
+    time -p sh -c "$cmd > /dev/null 2>&1"
+    
+    # Move up 4 lines (3 from `time -p` + 1 progress) and rewrite
+    terminal save
+    terminal move --up 4
+    terminal clear
+
+    print --green $name
+    
+    terminal restore
+    print
 end
 
-if test -x ./zig-out/bin/oshen
-    run_benchmark "Oshen" "./zig-out/bin/oshen $BENCHMARKS_DIR/oshen.wave"
-else
-    print "Oshen: (not built)"
-end
-
-if type zsh > /dev/null 2>&1
-    run_benchmark "Zsh" "zsh $BENCHMARKS_DIR/zsh.sh"
-else
-    print "Zsh: (not installed)"
-end
-
-if type fish > /dev/null 2>&1
-    run_benchmark "Fish" "fish $BENCHMARKS_DIR/fish.fish"
-else
-    print "Fish: (not installed)"
-end
-
-if type elvish > /dev/null 2>&1
-    run_benchmark "Elvish" "elvish $BENCHMARKS_DIR/elvish.elv"
-else
-    print "Elvish: (not installed)"
-end
+test -x ./zig-out/bin/oshen && bench "Oshen" "./zig-out/bin/oshen $DIR/oshen.wave"
+type zsh > /dev/null 2>&1 && bench "Zsh" "zsh $DIR/zsh.sh"
+type fish > /dev/null 2>&1 && bench "Fish" "fish $DIR/fish.fish"
+type elvish > /dev/null 2>&1 && bench "Elvish" "elvish $DIR/elvish.elv"

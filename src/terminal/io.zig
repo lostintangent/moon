@@ -4,6 +4,11 @@
 
 const std = @import("std");
 
+/// Check if stdout is connected to a TTY
+pub fn isStdoutTty() bool {
+    return std.posix.isatty(std.posix.STDOUT_FILENO);
+}
+
 /// Write data to a file descriptor, ignoring errors
 pub fn writeToFd(fd: std.posix.fd_t, data: []const u8) void {
     _ = std.posix.write(fd, data) catch {};

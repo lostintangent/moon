@@ -45,7 +45,7 @@ fn printJob(job: *const runtime_jobs.Job, highlighted: bool) void {
     }
 
     builtins.io.printStdout("[{d: >2}]{c}  {s: <7}    {s}", .{ job.id, marker, job.status.str(), job.cmd });
-    builtins.io.printStdout(ansi.clear_line_end ++ ansi.reset ++ "\n", .{});
+    builtins.io.printStdout(ansi.clear_line_right ++ ansi.reset ++ "\n", .{});
 }
 
 fn selectJob(state: *builtins.State) ?u16 {
@@ -63,11 +63,11 @@ fn selectJob(state: *builtins.State) ?u16 {
     const orig_termios = tui.enableRawMode(fd) catch return null;
 
     defer {
-        builtins.io.writeStdout(ansi.show_cursor);
+        builtins.io.writeStdout(ansi.cursor_show);
         tui.restoreTerminal(fd, orig_termios);
     }
 
-    builtins.io.writeStdout(ansi.hide_cursor);
+    builtins.io.writeStdout(ansi.cursor_hide);
 
     var selected_index: usize = 0;
     var first_frame: bool = true;
