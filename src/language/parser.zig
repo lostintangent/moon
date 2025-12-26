@@ -49,6 +49,8 @@ pub const ParseError = error{
     UnterminatedEach,
     UnterminatedWhile,
     MissingSeparator,
+    ConditionWithBackground,
+    ConditionWithCapture,
     OutOfMemory,
 };
 
@@ -512,7 +514,8 @@ pub const Parser = struct {
     /// Expects parser to be positioned after 'if' keyword.
     fn parseIfBranch(self: *Parser) ParseError!IfBranch {
         self.skipSeparators();
-        const condition = self.captureCondition();
+        const condition = try self.parseSimpleCommand() orelse return ParseError.UnexpectedEOF;
+        self.skipSeparators();
         const body = try self.captureBlockBody(&.{"else"}, ParseError.UnterminatedIf);
         return .{ .condition = condition, .body = body };
     }
@@ -564,7 +567,8 @@ pub const Parser = struct {
         _ = self.advance(); // consume 'while'
         self.skipSeparators();
 
-        const condition = self.captureCondition();
+        const condition = try self.parseSimpleCommand() orelse return ParseError.UnexpectedEOF;
+        self.skipSeparators();
         const body = try self.captureBlockBody(&.{}, ParseError.UnterminatedWhile);
         try self.consumeEnd();
 
@@ -589,15 +593,23 @@ pub const Parser = struct {
         return std.mem.trim(u8, self.extractSourceRange(start, self.pos), " \t\n");
     }
 
+    /// Parses a simple command: a command without background or capture.
+    /// Used for if/while conditions and defer statements.
+    fn parseSimpleCommand(self: *Parser) ParseError!?CommandStatement {
+        const cmd_stmt = try self.parseCommandStatement() orelse return null;
+
+        // Simple commands cannot be backgrounded or capture output
+        if (cmd_stmt.background) return ParseError.ConditionWithBackground;
+        if (cmd_stmt.capture != null) return ParseError.ConditionWithCapture;
+
+        return cmd_stmt;
+    }
+
     /// Parses a defer statement.
-    fn parseDeferStatement(self: *Parser) Statement {
+    fn parseDeferStatement(self: *Parser) ParseError!Statement {
         _ = self.advance(); // consume 'defer'
-        const start = self.pos;
-        while (self.pos < self.tokens.len and !self.isSeparator()) {
-            _ = self.advance();
-        }
-        const cmd_source = std.mem.trim(u8, self.extractSourceRange(start, self.pos), " \t\n");
-        return .{ .@"defer" = cmd_source };
+        const cmd_stmt = try self.parseSimpleCommand() orelse return ParseError.UnexpectedEOF;
+        return .{ .@"defer" = cmd_stmt };
     }
 
     /// Parses an output capture (=> or =>@).
@@ -609,6 +621,31 @@ pub const Parser = struct {
         const name = extractSimpleWord(self.advance().?) orelse return ParseError.InvalidCapture;
 
         return .{ .mode = mode, .variable = name };
+    }
+
+    /// Parses a command statement: logical chains with optional background and capture.
+    fn parseCommandStatement(self: *Parser) ParseError!?CommandStatement {
+        const chains = try self.parseLogical() orelse return null;
+        var background = false;
+        var capture: ?Capture = null;
+
+        if (self.isOperator(.background)) {
+            background = true;
+            _ = self.advance();
+        }
+
+        if (self.peekOperator()) |op| {
+            if (op.isCapture()) {
+                if (background) return ParseError.CaptureWithBackground;
+                capture = try self.parseCapture();
+            }
+        }
+
+        return .{
+            .background = background,
+            .capture = capture,
+            .chains = chains,
+        };
     }
 
     /// Parses a single statement (command, control flow, or function definition).
@@ -629,30 +666,11 @@ pub const Parser = struct {
             return .@"continue";
         }
         if (self.isKeyword("return")) return self.parseReturnStatement();
-        if (self.isKeyword("defer")) return self.parseDeferStatement();
+        if (self.isKeyword("defer")) return try self.parseDeferStatement();
 
         // Command statement
-        const chains = try self.parseLogical() orelse return null;
-        var background = false;
-        var capture: ?Capture = null;
-
-        if (self.isOperator(.background)) {
-            background = true;
-            _ = self.advance();
-        }
-
-        if (self.peekOperator()) |op| {
-            if (op.isCapture()) {
-                if (background) return ParseError.CaptureWithBackground;
-                capture = try self.parseCapture();
-            }
-        }
-
-        return .{ .command = .{
-            .background = background,
-            .capture = capture,
-            .chains = chains,
-        } };
+        const cmd_stmt = try self.parseCommandStatement() orelse return null;
+        return .{ .command = cmd_stmt };
     }
 
     // =========================================================================
@@ -953,12 +971,16 @@ test "If: simple statement" {
     defer arena.deinit();
 
     const input = "if true\n  echo yes\nend";
-    const prog = try parseTest(&arena, input);
+    const prog = try parseTestNoSource(&arena, input);
 
     try testing.expectEqual(@as(usize, 1), prog.statements.len);
     const @"if" = prog.statements[0].@"if";
     try testing.expectEqual(@as(usize, 1), @"if".branches.len);
-    try testing.expectEqualStrings("true", @"if".branches[0].condition);
+    // Condition is now a pre-parsed CommandStatement
+    const cond = @"if".branches[0].condition;
+    try testing.expectEqual(false, cond.background);
+    try testing.expectEqual(@as(?Capture, null), cond.capture);
+    try testing.expectEqual(@as(usize, 1), cond.chains.len);
     try testing.expect(std.mem.indexOf(u8, @"if".branches[0].body, "echo yes") != null);
     try testing.expectEqual(@as(?[]const u8, null), @"if".else_body);
 }
@@ -968,12 +990,13 @@ test "If: with else" {
     defer arena.deinit();
 
     const input = "if false\n  echo no\nelse\n  echo yes\nend";
-    const prog = try parseTest(&arena, input);
+    const prog = try parseTestNoSource(&arena, input);
 
     try testing.expectEqual(@as(usize, 1), prog.statements.len);
     const @"if" = prog.statements[0].@"if";
     try testing.expectEqual(@as(usize, 1), @"if".branches.len);
-    try testing.expectEqualStrings("false", @"if".branches[0].condition);
+    // Condition is pre-parsed
+    try testing.expectEqual(@as(usize, 1), @"if".branches[0].condition.chains.len);
     try testing.expect(std.mem.indexOf(u8, @"if".branches[0].body, "echo no") != null);
     try testing.expect(@"if".else_body != null);
     try testing.expect(std.mem.indexOf(u8, @"if".else_body.?, "echo yes") != null);
@@ -984,12 +1007,12 @@ test "If: inline statement" {
     defer arena.deinit();
 
     const input = "if true; echo yes; end";
-    const prog = try parseTest(&arena, input);
+    const prog = try parseTestNoSource(&arena, input);
 
     try testing.expectEqual(@as(usize, 1), prog.statements.len);
     const @"if" = prog.statements[0].@"if";
     try testing.expectEqual(@as(usize, 1), @"if".branches.len);
-    try testing.expectEqualStrings("true", @"if".branches[0].condition);
+    try testing.expectEqual(@as(usize, 1), @"if".branches[0].condition.chains.len);
     try testing.expect(std.mem.indexOf(u8, @"if".branches[0].body, "echo yes") != null);
 }
 
@@ -998,12 +1021,12 @@ test "If: nested statements" {
     defer arena.deinit();
 
     const input = "if true\n  if false\n    echo inner\n  end\nend";
-    const prog = try parseTest(&arena, input);
+    const prog = try parseTestNoSource(&arena, input);
 
     try testing.expectEqual(@as(usize, 1), prog.statements.len);
     const @"if" = prog.statements[0].@"if";
     try testing.expectEqual(@as(usize, 1), @"if".branches.len);
-    try testing.expectEqualStrings("true", @"if".branches[0].condition);
+    try testing.expectEqual(@as(usize, 1), @"if".branches[0].condition.chains.len);
     // Body should contain the nested if...end
     try testing.expect(std.mem.indexOf(u8, @"if".branches[0].body, "if false") != null);
     try testing.expect(std.mem.indexOf(u8, @"if".branches[0].body, "end") != null);
@@ -1014,14 +1037,17 @@ test "If: else-if chain" {
     defer arena.deinit();
 
     const input = "if test $x -eq 1\n  echo one\nelse if test $x -eq 2\n  echo two\nelse\n  echo other\nend";
-    const prog = try parseTest(&arena, input);
+    const prog = try parseTestNoSource(&arena, input);
 
     try testing.expectEqual(@as(usize, 1), prog.statements.len);
     const @"if" = prog.statements[0].@"if";
     try testing.expectEqual(@as(usize, 2), @"if".branches.len);
-    try testing.expectEqualStrings("test $x -eq 1", @"if".branches[0].condition);
+    // Both if and else-if conditions are pre-parsed
+    try testing.expectEqual(@as(usize, 1), @"if".branches[0].condition.chains.len);
+    try testing.expectEqual(@as(usize, 4), @"if".branches[0].condition.chains[0].pipeline.commands[0].words.len); // test $x -eq 1
     try testing.expect(std.mem.indexOf(u8, @"if".branches[0].body, "echo one") != null);
-    try testing.expectEqualStrings("test $x -eq 2", @"if".branches[1].condition);
+    try testing.expectEqual(@as(usize, 1), @"if".branches[1].condition.chains.len);
+    try testing.expectEqual(@as(usize, 4), @"if".branches[1].condition.chains[0].pipeline.commands[0].words.len); // test $x -eq 2
     try testing.expect(std.mem.indexOf(u8, @"if".branches[1].body, "echo two") != null);
     try testing.expect(@"if".else_body != null);
     try testing.expect(std.mem.indexOf(u8, @"if".else_body.?, "echo other") != null);
@@ -1032,11 +1058,14 @@ test "If: else-if without final else" {
     defer arena.deinit();
 
     const input = "if false; echo a; else if true; echo b; end";
-    const prog = try parseTest(&arena, input);
+    const prog = try parseTestNoSource(&arena, input);
 
     try testing.expectEqual(@as(usize, 1), prog.statements.len);
     const @"if" = prog.statements[0].@"if";
     try testing.expectEqual(@as(usize, 2), @"if".branches.len);
+    // Both branches have pre-parsed conditions
+    try testing.expectEqual(@as(usize, 1), @"if".branches[0].condition.chains.len);
+    try testing.expectEqual(@as(usize, 1), @"if".branches[1].condition.chains.len);
     try testing.expectEqual(@as(?[]const u8, null), @"if".else_body);
 }
 
@@ -1057,11 +1086,13 @@ test "While: simple statement" {
     defer arena.deinit();
 
     const input = "while test -f file\n  sleep 1\nend";
-    const prog = try parseTest(&arena, input);
+    const prog = try parseTestNoSource(&arena, input);
 
     try testing.expectEqual(@as(usize, 1), prog.statements.len);
     const while_stmt = prog.statements[0].@"while";
-    try testing.expectEqualStrings("test -f file", while_stmt.condition);
+    // Condition is pre-parsed
+    try testing.expectEqual(@as(usize, 1), while_stmt.condition.chains.len);
+    try testing.expectEqual(@as(usize, 3), while_stmt.condition.chains[0].pipeline.commands[0].words.len); // test -f file
     try testing.expect(std.mem.indexOf(u8, while_stmt.body, "sleep 1") != null);
 }
 
@@ -1070,11 +1101,12 @@ test "While: inline statement" {
     defer arena.deinit();
 
     const input = "while true; echo loop; end";
-    const prog = try parseTest(&arena, input);
+    const prog = try parseTestNoSource(&arena, input);
 
     try testing.expectEqual(@as(usize, 1), prog.statements.len);
     const while_stmt = prog.statements[0].@"while";
-    try testing.expectEqualStrings("true", while_stmt.condition);
+    // Condition is pre-parsed
+    try testing.expectEqual(@as(usize, 1), while_stmt.condition.chains.len);
     try testing.expect(std.mem.indexOf(u8, while_stmt.body, "echo loop") != null);
 }
 
@@ -1083,7 +1115,7 @@ test "While: nested in if" {
     defer arena.deinit();
 
     const input = "if true\n  while false\n    echo inner\n  end\nend";
-    const prog = try parseTest(&arena, input);
+    const prog = try parseTestNoSource(&arena, input);
 
     try testing.expectEqual(@as(usize, 1), prog.statements.len);
     const @"if" = prog.statements[0].@"if";
@@ -1172,11 +1204,17 @@ test "Defer: simple command" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
 
-    const prog = try parseTest(&arena, "defer rm -rf $tmpdir");
+    const prog = try parseTestNoSource(&arena, "defer rm -rf $tmpdir");
 
     try testing.expectEqual(@as(usize, 1), prog.statements.len);
     try testing.expect(prog.statements[0] == .@"defer");
-    try testing.expectEqualStrings("rm -rf $tmpdir", prog.statements[0].@"defer");
+
+    const defer_cmd = prog.statements[0].@"defer";
+    try testing.expectEqual(false, defer_cmd.background);
+    try testing.expectEqual(@as(?Capture, null), defer_cmd.capture);
+    try testing.expectEqual(@as(usize, 1), defer_cmd.chains.len);
+    try testing.expectEqual(@as(usize, 1), defer_cmd.chains[0].pipeline.commands.len);
+    try testing.expectEqual(@as(usize, 3), defer_cmd.chains[0].pipeline.commands[0].words.len);
 }
 
 test "Defer: in function" {
@@ -1190,6 +1228,59 @@ test "Defer: in function" {
     const fun_def = prog.statements[0].function;
     try testing.expectEqualStrings("cleanup", fun_def.name);
     try testing.expect(std.mem.indexOf(u8, fun_def.body, "defer echo done") != null);
+}
+
+test "Defer: with pipeline" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    const prog = try parseTestNoSource(&arena, "defer cat file | grep foo");
+
+    try testing.expectEqual(@as(usize, 1), prog.statements.len);
+    try testing.expect(prog.statements[0] == .@"defer");
+
+    const defer_cmd = prog.statements[0].@"defer";
+    try testing.expectEqual(@as(usize, 1), defer_cmd.chains.len);
+    try testing.expectEqual(@as(usize, 2), defer_cmd.chains[0].pipeline.commands.len);
+}
+
+test "Defer: with logical chain" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    const prog = try parseTestNoSource(&arena, "defer rm file && echo done");
+
+    try testing.expectEqual(@as(usize, 1), prog.statements.len);
+    try testing.expect(prog.statements[0] == .@"defer");
+
+    const defer_cmd = prog.statements[0].@"defer";
+    try testing.expectEqual(@as(usize, 2), defer_cmd.chains.len);
+    try testing.expectEqual(ast.ChainOperator.none, defer_cmd.chains[0].op);
+    try testing.expectEqual(ast.ChainOperator.@"and", defer_cmd.chains[1].op);
+}
+
+test "Defer: background error" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    const input = "defer rm file &";
+    var lex = lexer.Lexer.init(arena.allocator(), input);
+    const tokens = try lex.tokenize();
+    var p = Parser.initWithInput(arena.allocator(), tokens, input);
+
+    try testing.expectError(ParseError.ConditionWithBackground, p.parse());
+}
+
+test "Defer: capture error" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    const input = "defer whoami => user";
+    var lex = lexer.Lexer.init(arena.allocator(), input);
+    const tokens = try lex.tokenize();
+    var p = Parser.initWithInput(arena.allocator(), tokens, input);
+
+    try testing.expectError(ParseError.ConditionWithCapture, p.parse());
 }
 
 // =============================================================================

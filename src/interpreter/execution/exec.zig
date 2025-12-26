@@ -100,9 +100,9 @@ pub fn executeStatement(allocator: std.mem.Allocator, state: *State, stmt: ast.S
             // If no argument, status is already the last command's exit status
             return state.status;
         },
-        .@"defer" => |cmd_source| {
-            // Push the command onto the defer stack (will be executed LIFO on function exit)
-            state.pushDefer(cmd_source) catch {
+        .@"defer" => |cmd_stmt| {
+            // Push the pre-parsed command onto the defer stack (will be executed LIFO on function exit)
+            state.pushDefer(cmd_stmt) catch {
                 return 1;
             };
             return 0;
@@ -142,7 +142,11 @@ fn consumeLoopSignal(state: *State) ?LoopSignal {
 fn executeIfStatement(allocator: std.mem.Allocator, state: *State, if_stmt: expansion_types.ast.IfStatement) u8 {
     // Try each branch in order (first is "if", rest are "else if")
     for (if_stmt.branches) |branch| {
-        const cond_status = executeBody(allocator, state, branch.condition, "if: condition error");
+        // Execute the pre-parsed condition directly
+        const cond_status = executeSimpleCommand(allocator, state, branch.condition) catch |err| {
+            io.printError("if: condition error: {}\n", .{err});
+            return 1;
+        };
 
         // Check for return during condition evaluation
         if (state.fn_return) return state.status;
@@ -275,20 +279,15 @@ fn expandItems(arena_alloc: std.mem.Allocator, state: *State, items_source: []co
 
 /// Execute a while loop by repeatedly checking condition and running body.
 ///
-/// OPTIMIZATION: Parses condition and body once upfront, then executes the
-/// pre-parsed AST on each iteration. This avoids re-lexing/parsing on every
-/// loop iteration - only expansion (variable substitution, globs) happens per-iteration.
+/// The condition is pre-parsed at parse time. The body is parsed once on first
+/// iteration, then re-executed each iteration (only expansion happens per-iteration).
 fn executeWhileStatement(allocator: std.mem.Allocator, state: *State, while_stmt: expansion_types.ast.WhileStatement) u8 {
-    // Parse arena - lives for entire loop duration, holds the cached ASTs
+    // Parse arena - lives for entire loop duration, holds the cached body AST
     var parse_arena = std.heap.ArenaAllocator.init(allocator);
     defer parse_arena.deinit();
     const parse_alloc = parse_arena.allocator();
 
-    // Parse condition and body once upfront
-    const cond_parsed = interpreter_mod.parseInput(parse_alloc, while_stmt.condition) catch |err| {
-        io.printError("while: condition parse error: {}\n", .{err});
-        return 1;
-    };
+    // Parse body once upfront
     const body_parsed = interpreter_mod.parseInput(parse_alloc, while_stmt.body) catch |err| {
         io.printError("while: body parse error: {}\n", .{err});
         return 1;
@@ -297,8 +296,8 @@ fn executeWhileStatement(allocator: std.mem.Allocator, state: *State, while_stmt
     var last_status: u8 = 0;
 
     while (true) {
-        // Execute pre-parsed condition (expansion happens inside executeAst)
-        const cond_status = interpreter_mod.executeAst(allocator, state, cond_parsed) catch |err| {
+        // Execute the pre-parsed condition directly
+        const cond_status = executeSimpleCommand(allocator, state, while_stmt.condition) catch |err| {
             io.printError("while: condition error: {}\n", .{err});
             return 1;
         };
@@ -329,18 +328,9 @@ fn executeWhileStatement(allocator: std.mem.Allocator, state: *State, while_stmt
 // Command Execution
 // =============================================================================
 
-fn executeCmdStatement(allocator: std.mem.Allocator, state: *State, stmt: expansion_types.ast.CommandStatement, cmd_str: []const u8) !u8 {
-    // For background jobs, we run the pipeline in a process group
-    if (stmt.background) {
-        return executeBackgroundJob(allocator, state, stmt, cmd_str);
-    }
-
-    // Handle capture: redirect stdout to a pipe and read the output
-    if (stmt.capture) |capture| {
-        return executeCmdWithCapture(allocator, state, stmt, capture);
-    }
-
-    // Foreground execution
+/// Execute a simple command (no background, no capture) and return the exit status.
+/// Used for if/while conditions and defer statements.
+fn executeSimpleCommand(allocator: std.mem.Allocator, state: *State, stmt: ast.CommandStatement) !u8 {
     var last_status: u8 = 0;
     var should_continue = true;
 
@@ -370,6 +360,21 @@ fn executeCmdStatement(allocator: std.mem.Allocator, state: *State, stmt: expans
 
     state.setStatus(last_status);
     return last_status;
+}
+
+fn executeCmdStatement(allocator: std.mem.Allocator, state: *State, stmt: expansion_types.ast.CommandStatement, cmd_str: []const u8) !u8 {
+    // For background jobs, we run the pipeline in a process group
+    if (stmt.background) {
+        return executeBackgroundJob(allocator, state, stmt, cmd_str);
+    }
+
+    // Handle capture: redirect stdout to a pipe and read the output
+    if (stmt.capture) |capture| {
+        return executeCmdWithCapture(allocator, state, stmt, capture);
+    }
+
+    // Foreground execution - delegate to simple command executor
+    return executeSimpleCommand(allocator, state, stmt);
 }
 
 /// Free memory allocated for expanded commands
@@ -541,9 +546,9 @@ const SavedArgv = struct {
 fn runDeferredCommandsFromIndex(allocator: std.mem.Allocator, state: *State, from_index: usize) void {
     // Pop and execute in reverse order (LIFO), but only commands added after from_index
     while (state.deferred.items.len > from_index) {
-        const cmd = state.popDeferred().?;
-        defer state.allocator.free(cmd);
-        _ = interpreter_mod.execute(allocator, state, cmd) catch {};
+        const cmd_stmt = state.popDeferred().?;
+        // Execute the pre-parsed simple command directly (no re-parsing needed)
+        _ = executeSimpleCommand(allocator, state, cmd_stmt) catch {};
     }
 }
 

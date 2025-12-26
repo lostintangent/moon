@@ -7,6 +7,7 @@ const std = @import("std");
 const jobs = @import("jobs.zig");
 const env = @import("env.zig");
 const interpreter = @import("../interpreter/interpreter.zig");
+const ast = @import("../language/ast.zig");
 
 pub const JobTable = jobs.JobTable;
 pub const Job = jobs.Job;
@@ -96,8 +97,9 @@ pub const State = struct {
     /// Flag to signal function should return
     fn_return: bool = false,
 
-    /// Stack of deferred commands (LIFO execution order)
-    deferred: std.ArrayListUnmanaged([]const u8),
+    /// Stack of deferred commands (LIFO execution order).
+    /// CommandStatements contain slices that point into the cached function AST.
+    deferred: std.ArrayListUnmanaged(ast.CommandStatement),
 
     // =========================================================================
     // Memory Management Helpers
@@ -182,10 +184,7 @@ pub const State = struct {
         // Clean up jobs
         self.jobs.deinit();
 
-        // Free deferred commands
-        for (self.deferred.items) |cmd| {
-            self.allocator.free(cmd);
-        }
+        // Deferred commands are pointers into cached AST, no need to free contents
         self.deferred.deinit(self.allocator);
     }
 
@@ -326,14 +325,14 @@ pub const State = struct {
         self.cwd = null;
     }
 
-    /// Push a deferred command onto the stack (executed LIFO on function exit)
-    pub fn pushDefer(self: *State, cmd: []const u8) !void {
-        const duped = try self.allocator.dupe(u8, cmd);
-        try self.deferred.append(self.allocator, duped);
+    /// Push a deferred command onto the stack (executed LIFO on function exit).
+    /// The CommandStatement's internal slices point into the cached AST, so no deep copy needed.
+    pub fn pushDefer(self: *State, cmd_stmt: ast.CommandStatement) !void {
+        try self.deferred.append(self.allocator, cmd_stmt);
     }
 
     /// Pop and return the last deferred command, or null if empty
-    pub fn popDeferred(self: *State) ?[]const u8 {
+    pub fn popDeferred(self: *State) ?ast.CommandStatement {
         if (self.deferred.items.len == 0) return null;
         return self.deferred.pop();
     }

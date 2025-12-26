@@ -32,8 +32,8 @@ pub const FunctionDefinition = struct {
 
 /// A single if/else-if branch with its condition and body.
 pub const IfBranch = struct {
-    /// The condition source (e.g., "test $x -eq 1")
-    condition: []const u8,
+    /// The pre-parsed condition (always has background=false, capture=null)
+    condition: CommandStatement,
     /// The body source to execute if condition is true
     body: []const u8,
 };
@@ -63,8 +63,8 @@ pub const EachStatement = struct {
 
 /// A while loop: `while condition... end`
 pub const WhileStatement = struct {
-    /// The condition source to evaluate each iteration
-    condition: []const u8,
+    /// The pre-parsed condition (always has background=false, capture=null)
+    condition: CommandStatement,
     /// The loop body source
     body: []const u8,
 };
@@ -172,6 +172,7 @@ pub const CommandStatement = struct {
     capture: ?Capture,
 };
 
+
 // =============================================================================
 // Statements and Program
 // =============================================================================
@@ -194,8 +195,9 @@ pub const Statement = union(enum) {
     @"continue",
     /// Return from current function with optional status (raw source, expanded at runtime)
     @"return": ?[]const u8,
-    /// Defer a command to run when the current function exits
-    @"defer": []const u8,
+    /// Defer a command to run when the current function exits.
+    /// Stores the pre-parsed command (always has background=false, capture=null).
+    @"defer": CommandStatement,
 };
 
 /// The top-level AST node representing a complete program.
