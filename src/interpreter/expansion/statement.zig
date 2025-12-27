@@ -205,6 +205,7 @@ test "simple command" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     var state = State.init(arena.allocator());
+    state.initCurrentScope();
     defer state.deinit();
     var ctx = expand.ExpandContext.init(arena.allocator(), &state);
     defer ctx.deinit();
@@ -236,6 +237,7 @@ test "with variable expansion" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     var state = State.init(arena.allocator());
+    state.initCurrentScope();
     defer state.deinit();
     var ctx = expand.ExpandContext.init(arena.allocator(), &state);
     defer ctx.deinit();
@@ -258,6 +260,7 @@ test "with env prefix" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     var state = State.init(arena.allocator());
+    state.initCurrentScope();
     defer state.deinit();
     var ctx = expand.ExpandContext.init(arena.allocator(), &state);
     defer ctx.deinit();
@@ -296,6 +299,7 @@ test "redirect: variable expansion in path" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     var state = State.init(arena.allocator());
+    state.initCurrentScope();
     defer state.deinit();
     var ctx = expand.ExpandContext.init(arena.allocator(), &state);
     defer ctx.deinit();
@@ -322,6 +326,7 @@ test "redirect: double-quoted path with spaces" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     var state = State.init(arena.allocator());
+    state.initCurrentScope();
     defer state.deinit();
     var ctx = expand.ExpandContext.init(arena.allocator(), &state);
     defer ctx.deinit();
@@ -345,6 +350,7 @@ test "redirect: single-quoted path prevents expansion" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     var state = State.init(arena.allocator());
+    state.initCurrentScope();
     defer state.deinit();
     var ctx = expand.ExpandContext.init(arena.allocator(), &state);
     defer ctx.deinit();
@@ -373,6 +379,7 @@ test "redirect: double-quoted path expands variables" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     var state = State.init(arena.allocator());
+    state.initCurrentScope();
     defer state.deinit();
     var ctx = expand.ExpandContext.init(arena.allocator(), &state);
     defer ctx.deinit();

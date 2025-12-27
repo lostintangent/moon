@@ -185,7 +185,7 @@ fn stringSet(comptime strings: []const []const u8) std.StaticStringMap(void) {
     }
 }
 
-const keywords = stringSet(&.{ "and", "or", "fun", "end", "if", "else", "for", "each", "in", "while", "break", "continue", "return", "defer" });
+const keywords = stringSet(&.{ "and", "or", "fun", "end", "if", "else", "for", "each", "in", "while", "break", "continue", "return", "defer", "exit" });
 pub fn isKeyword(word: []const u8) bool {
     return keywords.has(word);
 }

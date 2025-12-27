@@ -87,6 +87,7 @@ test "export: NAME=VALUE syntax" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     var state = State.init(arena.allocator());
+    state.initCurrentScope();
     defer state.deinit();
 
     const cmd = test_utils.makeCmd(&[_][]const u8{ "export", "OSHEN_TEST_VAR=testvalue" });
@@ -108,6 +109,7 @@ test "export: existing shell variable" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     var state = State.init(arena.allocator());
+    state.initCurrentScope();
     defer state.deinit();
 
     // First set a shell variable
@@ -128,6 +130,7 @@ test "export: nonexistent variable fails" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     var state = State.init(arena.allocator());
+    state.initCurrentScope();
     defer state.deinit();
 
     const cmd = test_utils.makeCmd(&[_][]const u8{ "export", "OSHEN_NONEXISTENT_67890" });
@@ -139,6 +142,7 @@ test "export: space-separated NAME VALUE syntax" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     var state = State.init(arena.allocator());
+    state.initCurrentScope();
     defer state.deinit();
 
     const cmd = test_utils.makeCmd(&[_][]const u8{ "export", "OSHEN_SPACE_VAR", "spacevalue" });
@@ -160,6 +164,7 @@ test "export: too many arguments fails" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     var state = State.init(arena.allocator());
+    state.initCurrentScope();
     defer state.deinit();
 
     const cmd = test_utils.makeCmd(&[_][]const u8{ "export", "OSHEN_TOO_MANY", "value", "extra" });
@@ -171,6 +176,7 @@ test "export: multiple NAME=VALUE pairs" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     var state = State.init(arena.allocator());
+    state.initCurrentScope();
     defer state.deinit();
 
     const cmd = test_utils.makeCmd(&[_][]const u8{ "export", "OSHEN_MULTI_A=aval", "OSHEN_MULTI_B=bval" });

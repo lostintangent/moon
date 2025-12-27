@@ -11,6 +11,7 @@ const std = @import("std");
 const expansion_types = @import("../expansion/expanded.zig");
 const state_mod = @import("../../runtime/state.zig");
 const State = state_mod.State;
+const Scope = @import("../../runtime/scope.zig").Scope;
 const builtins = @import("../../runtime/builtins.zig");
 const io = @import("../../terminal/io.zig");
 const interpreter_mod = @import("../interpreter.zig");
@@ -46,6 +47,10 @@ pub fn execute(allocator: std.mem.Allocator, state: *State, prog: ast.Program, c
 
     for (prog.statements) |stmt| {
         last_status = try executeStatement(allocator, state, stmt, cmd_str);
+        // Check if exit was requested
+        if (state.should_exit) {
+            return state.exit_code;
+        }
     }
 
     return last_status;
@@ -107,6 +112,38 @@ pub fn executeStatement(allocator: std.mem.Allocator, state: *State, stmt: ast.S
             };
             return 0;
         },
+        .@"exit" => |opt_status_str| {
+            state.should_exit = true;
+            if (opt_status_str) |status_str| {
+                // Tokenize, expand, and parse the exit code at runtime
+                var lexer = lexer_mod.Lexer.init(allocator, status_str);
+                const tokens = lexer.tokenize() catch {
+                    io.printError("exit: invalid argument\n", .{});
+                    state.exit_code = 1;
+                    return 1;
+                };
+                if (tokens.len > 0 and tokens[0].kind == .word) {
+                    var expand_ctx = expand.ExpandContext.init(allocator, state);
+                    defer expand_ctx.deinit();
+                    const expanded = expand.expandWord(&expand_ctx, tokens[0].kind.word) catch {
+                        io.printError("exit: expansion error\n", .{});
+                        state.exit_code = 1;
+                        return 1;
+                    };
+                    if (expanded.len > 0) {
+                        const parsed = std.fmt.parseInt(u8, expanded[0], 10) catch blk: {
+                            io.printError("exit: {s}: numeric argument required\n", .{expanded[0]});
+                            break :blk 1;
+                        };
+                        state.exit_code = parsed;
+                    }
+                }
+            } else {
+                // If no argument, use the last command's exit status
+                state.exit_code = state.status;
+            }
+            return state.exit_code;
+        },
     };
 }
 
@@ -138,7 +175,8 @@ fn consumeLoopSignal(state: *State) ?LoopSignal {
     return null;
 }
 
-/// Execute an if statement by evaluating condition branches and running appropriate branch
+/// Execute an if statement by evaluating condition branches and running appropriate branch.
+/// Each branch body gets its own scope - variables created inside are block-local.
 fn executeIfStatement(allocator: std.mem.Allocator, state: *State, if_stmt: expansion_types.ast.IfStatement) u8 {
     // Try each branch in order (first is "if", rest are "else if")
     for (if_stmt.branches) |branch| {
@@ -153,6 +191,13 @@ fn executeIfStatement(allocator: std.mem.Allocator, state: *State, if_stmt: expa
 
         // Exit status 0 means true (success) - execute this branch's body
         if (cond_status == 0) {
+            // Push a scope for this branch - variables created inside are block-local
+            _ = state.pushScope() catch {
+                io.printError("if: out of memory\n", .{});
+                return 1;
+            };
+            defer state.popScope();
+
             const body_status = executeBody(allocator, state, branch.body, "if: body error");
             // fn_return propagates automatically since we return the status
             return body_status;
@@ -161,6 +206,13 @@ fn executeIfStatement(allocator: std.mem.Allocator, state: *State, if_stmt: expa
 
     // No branch condition was true - try else body if present
     if (if_stmt.else_body) |else_body| {
+        // Push a scope for else branch
+        _ = state.pushScope() catch {
+            io.printError("if: out of memory\n", .{});
+            return 1;
+        };
+        defer state.popScope();
+
         return executeBody(allocator, state, else_body, "if: else error");
     }
 
@@ -170,68 +222,56 @@ fn executeIfStatement(allocator: std.mem.Allocator, state: *State, if_stmt: expa
 /// Execute an each loop (for is an alias).
 ///
 /// Sets $item (or custom var) and $index (1-based) on each iteration.
-/// Inner loops shadow outer loop variables; values are restored on loop exit.
+/// Loop variables are scoped to the loop body and automatically cleaned up.
 ///
-/// OPTIMIZATION: Parses body once upfront, then executes the pre-parsed AST
-/// on each iteration. This avoids re-lexing/parsing on every loop iteration.
+/// OPTIMIZATION: Uses scope-based variable management with arena reset per iteration.
+/// - Loop scope is pushed once, reset each iteration (O(1) variable cleanup)
+/// - Body AST is parsed once and reused for all iterations
+/// - Arena allocations are amortized across iterations
 fn executeEachStatement(allocator: std.mem.Allocator, state: *State, stmt: expansion_types.ast.EachStatement) u8 {
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    defer arena.deinit();
-    const arena_alloc = arena.allocator();
+    // Parse arena - lives for entire loop, holds cached body AST and expanded items
+    var parse_arena = std.heap.ArenaAllocator.init(allocator);
+    defer parse_arena.deinit();
+    const parse_alloc = parse_arena.allocator();
 
-    // Save previous values of loop variables (for nested loop shadowing).
-    // Must dupe because the original slices point into state's memory,
-    // which gets freed when we set the loop variable.
-    const old_item: ?[]const u8 = if (state.getVar(stmt.variable)) |v|
-        arena_alloc.dupe(u8, v) catch null
-    else
-        null;
-    const old_index: ?[]const u8 = if (state.getVar("index")) |v|
-        arena_alloc.dupe(u8, v) catch null
-    else
-        null;
-
-    // Restore loop variables on exit (handles break, continue, return, normal exit)
-    defer {
-        if (old_item) |v| {
-            state.setVar(stmt.variable, v) catch {};
-        } else {
-            state.unsetVar(stmt.variable);
-        }
-        if (old_index) |v| {
-            state.setVar("index", v) catch {};
-        } else {
-            state.unsetVar("index");
-        }
-    }
-
-    // Expand items_source into a list of strings
-    const items = expandItems(arena_alloc, state, stmt.items_source) orelse return 1;
+    // Expand items_source into a list of strings (lives for loop duration)
+    const items = expandItems(parse_alloc, state, stmt.items_source) orelse return 1;
 
     // Parse body once (cached for all iterations)
-    const body_ast = interpreter_mod.parseInput(arena_alloc, stmt.body) catch |err| {
+    const body_ast = interpreter_mod.parseInput(parse_alloc, stmt.body) catch |err| {
         io.printError("each: body parse error: {}\n", .{err});
         return 1;
     };
+
+    // Push a scope for loop variables - they're automatically cleaned up on pop
+    const loop_scope = state.pushScope() catch {
+        io.printError("each: out of memory\n", .{});
+        return 1;
+    };
+    defer state.popScope();
 
     // Execute body for each item
     var index_buf: [20]u8 = undefined;
     var last_status: u8 = 0;
 
     for (items, 0..) |item, i| {
-        state.setVar(stmt.variable, item) catch |err| {
+        // Reset scope arena for this iteration (O(1) cleanup of previous iteration's vars)
+        loop_scope.reset();
+
+        // Set loop variables in loop scope (arena-allocated, freed on reset)
+        loop_scope.setLocalScalar(stmt.variable, item) catch |err| {
             io.printError("each: set var error: {}\n", .{err});
             return 1;
         };
 
         // Set $index (1-based, matching Oshen's 1-based array indexing)
         const index_str = std.fmt.bufPrint(&index_buf, "{d}", .{i + 1}) catch unreachable;
-        state.setVar("index", index_str) catch |err| {
+        loop_scope.setLocalScalar("index", index_str) catch |err| {
             io.printError("each: set index error: {}\n", .{err});
             return 1;
         };
 
-        last_status = interpreter_mod.executeAst(allocator, state, body_ast) catch |err| {
+        last_status = interpreter_mod.executeAstWithArena(loop_scope.allocator(), state, body_ast) catch |err| {
             io.printError("each: body error: {}\n", .{err});
             return 1;
         };
@@ -281,6 +321,11 @@ fn expandItems(arena_alloc: std.mem.Allocator, state: *State, items_source: []co
 ///
 /// The condition is pre-parsed at parse time. The body is parsed once on first
 /// iteration, then re-executed each iteration (only expansion happens per-iteration).
+///
+/// OPTIMIZATION: Uses scope-based variable management with arena reset per iteration.
+/// - Loop scope is pushed once, reset each iteration (O(1) cleanup)
+/// - Body AST is parsed once and reused for all iterations
+/// - Variables created in loop body are scoped to the loop
 fn executeWhileStatement(allocator: std.mem.Allocator, state: *State, while_stmt: expansion_types.ast.WhileStatement) u8 {
     // Parse arena - lives for entire loop duration, holds the cached body AST
     var parse_arena = std.heap.ArenaAllocator.init(allocator);
@@ -293,11 +338,21 @@ fn executeWhileStatement(allocator: std.mem.Allocator, state: *State, while_stmt
         return 1;
     };
 
+    // Push a scope for loop body - variables created inside are block-local
+    const loop_scope = state.pushScope() catch {
+        io.printError("while: out of memory\n", .{});
+        return 1;
+    };
+    defer state.popScope();
+
     var last_status: u8 = 0;
 
     while (true) {
-        // Execute the pre-parsed condition directly
-        const cond_status = executeSimpleCommand(allocator, state, while_stmt.condition) catch |err| {
+        // Reset scope arena for this iteration (O(1) cleanup of previous iteration's vars)
+        loop_scope.reset();
+
+        // Execute the pre-parsed condition using the loop scope's arena
+        const cond_status = executeSimpleCommand(loop_scope.allocator(), state, while_stmt.condition) catch |err| {
             io.printError("while: condition error: {}\n", .{err});
             return 1;
         };
@@ -308,8 +363,8 @@ fn executeWhileStatement(allocator: std.mem.Allocator, state: *State, while_stmt
         // Exit status 0 means true (continue), non-zero means false (stop)
         if (cond_status != 0) break;
 
-        // Execute pre-parsed body
-        last_status = interpreter_mod.executeAst(allocator, state, body_parsed) catch |err| {
+        // Execute pre-parsed body using the loop scope's arena
+        last_status = interpreter_mod.executeAstWithArena(loop_scope.allocator(), state, body_parsed) catch |err| {
             io.printError("while: body error: {}\n", .{err});
             return 1;
         };
@@ -500,47 +555,6 @@ fn executeBackgroundJob(allocator: std.mem.Allocator, state: *State, stmt: expan
 // Functions
 // =============================================================================
 
-/// Saved argv state for restoration after function call.
-/// Deep copies values using state's allocator to outlive ephemeral arenas.
-const SavedArgv = struct {
-    values: ?[]const []const u8,
-    allocator: std.mem.Allocator,
-
-    fn save(state: *State) SavedArgv {
-        const allocator = state.allocator;
-        const old = state.getVarList("argv") orelse return .{ .values = null, .allocator = allocator };
-        return .{
-            .values = deepCopy(allocator, old) catch null,
-            .allocator = allocator,
-        };
-    }
-
-    fn restore(self: SavedArgv, state: *State) void {
-        defer self.deinit();
-        if (self.values) |v| state.setVarList("argv", v) catch {} else state.unsetVar("argv");
-    }
-
-    fn deinit(self: SavedArgv) void {
-        const values = self.values orelse return;
-        for (values) |v| self.allocator.free(v);
-        self.allocator.free(values);
-    }
-
-    fn deepCopy(allocator: std.mem.Allocator, source: []const []const u8) ![]const []const u8 {
-        const copy = try allocator.alloc([]const u8, source.len);
-        var copied: usize = 0;
-        errdefer {
-            for (copy[0..copied]) |s| allocator.free(s);
-            allocator.free(copy);
-        }
-        for (source) |s| {
-            copy[copied] = try allocator.dupe(u8, s);
-            copied += 1;
-        }
-        return copy;
-    }
-};
-
 /// Execute deferred commands from a given index in LIFO order.
 /// This allows nested functions to only run their own defers.
 fn runDeferredCommandsFromIndex(allocator: std.mem.Allocator, state: *State, from_index: usize) void {
@@ -558,18 +572,24 @@ fn runFunctionWithArgs(allocator: std.mem.Allocator, state: *State, cmd: Expande
     const name = cmd.argv[0];
     const func = state.getFunction(name) orelse return null;
 
-    // Save current $argv (deep copy to survive setVarList freeing the original)
-    const saved_argv = SavedArgv.save(state);
-
     // Remember how many deferred commands exist before this function
     const defer_count_before = state.deferred.items.len;
 
-    // Guaranteed cleanup on all exit paths
-    defer saved_argv.restore(state);
+    // Push a function scope - $argv and any local variables are scoped here
+    const fn_scope = state.pushScope() catch {
+        io.printError("function {s}: out of memory\n", .{name});
+        return 1;
+    };
+
+    // Guaranteed cleanup: pop scope and run defers on all exit paths
+    defer state.popScope();
     defer runDeferredCommandsFromIndex(allocator, state, defer_count_before);
 
-    // Set $argv to function arguments (skip function name)
-    state.setVarList("argv", if (cmd.argv.len > 1) cmd.argv[1..] else &.{}) catch {};
+    // Set $argv in the function scope (automatically restored when scope pops)
+    fn_scope.setLocalList("argv", if (cmd.argv.len > 1) cmd.argv[1..] else &.{}) catch {
+        io.printError("function {s}: out of memory\n", .{name});
+        return 1;
+    };
 
     // Get cached parse or parse on first call, then execute
     const parsed = func.getParsed() catch |err| {
@@ -583,6 +603,11 @@ fn runFunctionWithArgs(allocator: std.mem.Allocator, state: *State, cmd: Expande
         state.fn_return = false;
         return 1;
     };
+
+    // Check if exit was requested - propagate without clearing flag
+    if (state.should_exit) {
+        return state.exit_code;
+    }
 
     if (state.fn_return) {
         state.fn_return = false;

@@ -103,6 +103,7 @@ test "prompt: buildDefault returns valid prompt" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     var state = State.init(arena.allocator());
+    state.initCurrentScope();
     defer state.deinit();
 
     var buf: [4096]u8 = undefined;
@@ -118,6 +119,7 @@ test "prompt: tilde substitution in path" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     var state = State.init(arena.allocator());
+    state.initCurrentScope();
     defer state.deinit();
 
     // Set home to a known value
@@ -135,6 +137,7 @@ test "prompt: build uses custom prompt function if defined" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     var state = State.init(arena.allocator());
+    state.initCurrentScope();
     defer state.deinit();
 
     // Define a custom prompt function
@@ -151,6 +154,7 @@ test "prompt: build falls back to default without prompt function" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     var state = State.init(arena.allocator());
+    state.initCurrentScope();
     defer state.deinit();
 
     var buf: [4096]u8 = undefined;

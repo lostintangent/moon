@@ -34,7 +34,7 @@ fn run(state: *builtins.State, cmd: builtins.ExpandedCmd) u8 {
         return reportParseError(err, argv);
     };
 
-    const current_str = getVarValue(state, var_name) orelse {
+    const current_str = state.getVar(var_name) orelse {
         builtins.io.printError("increment: variable '{s}' does not exist\n", .{var_name});
         return 1;
     };
@@ -54,8 +54,8 @@ fn run(state: *builtins.State, cmd: builtins.ExpandedCmd) u8 {
     var buf: [32]u8 = undefined;
     const new_str = std.fmt.bufPrint(&buf, "{d}", .{new_val}) catch unreachable;
 
-    const values = &[_][]const u8{new_str};
-    state.setVarList(var_name, values) catch {
+    // Set the new value - scope-based allocation handles performance
+    state.setVar(var_name, new_str) catch {
         builtins.io.printError("increment: out of memory\n", .{});
         return 1;
     };
@@ -66,14 +66,6 @@ fn run(state: *builtins.State, cmd: builtins.ExpandedCmd) u8 {
 // =============================================================================
 // Helper Functions
 // =============================================================================
-
-/// Get variable value, checking shell variables first, then environment.
-fn getVarValue(state: *builtins.State, name: []const u8) ?[]const u8 {
-    if (state.vars.get(name)) |values| {
-        if (values.len > 0) return values[0];
-    }
-    return builtins.env.get(name);
-}
 
 const ParseError = error{
     InvalidOption,
@@ -117,6 +109,7 @@ fn testWithState(comptime f: fn (*State) anyerror!void) !void {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     var state = State.init(arena.allocator());
+    state.initCurrentScope();
     defer state.deinit();
     try f(&state);
 }

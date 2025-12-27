@@ -22,7 +22,6 @@ pub const Builtin = struct {
 };
 
 // Import individual builtin modules
-const exit_builtin = @import("builtins/exit.zig");
 const cd_builtin = @import("builtins/cd.zig");
 const pwd_builtin = @import("builtins/pwd.zig");
 const jobs_builtin = @import("builtins/jobs.zig");
@@ -48,7 +47,6 @@ const terminal_builtin = @import("builtins/terminal.zig");
 
 /// All registered builtins - single source of truth
 const all_builtins = [_]Builtin{
-    exit_builtin.builtin,
     cd_builtin.builtin,
     pwd_builtin.builtin,
     jobs_builtin.builtin,

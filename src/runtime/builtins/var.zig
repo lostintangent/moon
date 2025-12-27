@@ -1,6 +1,7 @@
 //! var/set builtin - get or set shell variables
 const std = @import("std");
 const builtins = @import("../builtins.zig");
+const ScopeValue = @import("../scope.zig").Value;
 
 pub const builtin = builtins.Builtin{
     .name = "var",
@@ -17,16 +18,12 @@ pub const set_builtin = builtins.Builtin{
 fn run(state: *builtins.State, cmd: builtins.ExpandedCmd) u8 {
     const argv = cmd.argv;
 
-    // set with no args: list all variables
+    // set with no args: list all variables in the global scope
     if (argv.len == 1) {
-        var iter = state.vars.iterator();
+        var iter = state.global_scope.iterator();
         while (iter.next()) |entry| {
             builtins.io.printStdout("{s} = ", .{entry.key_ptr.*});
-            const values = entry.value_ptr.*;
-            for (values, 0..) |v, i| {
-                if (i > 0) builtins.io.writeStdout(" ");
-                builtins.io.printStdout("{s}", .{v});
-            }
+            printValue(entry.value_ptr.*);
             builtins.io.writeStdout("\n");
         }
         return 0;
@@ -34,15 +31,8 @@ fn run(state: *builtins.State, cmd: builtins.ExpandedCmd) u8 {
 
     // set NAME: show single variable
     if (argv.len == 2) {
-        if (state.vars.get(argv[1])) |values| {
-            for (values, 0..) |v, i| {
-                if (i > 0) builtins.io.writeStdout(" ");
-                builtins.io.printStdout("{s}", .{v});
-            }
-            builtins.io.writeStdout("\n");
-            return 0;
-        } else if (builtins.env.get(argv[1])) |env_val| {
-            builtins.io.printStdout("{s}\n", .{env_val});
+        if (state.getVar(argv[1])) |value| {
+            builtins.io.printStdout("{s}\n", .{value});
             return 0;
         }
         return 1; // Variable not found
@@ -58,4 +48,16 @@ fn run(state: *builtins.State, cmd: builtins.ExpandedCmd) u8 {
     };
 
     return 0;
+}
+
+fn printValue(value: ScopeValue) void {
+    switch (value) {
+        .scalar => |s| builtins.io.printStdout("{s}", .{s}),
+        .list => |list| {
+            for (list, 0..) |v, i| {
+                if (i > 0) builtins.io.writeStdout(" ");
+                builtins.io.printStdout("{s}", .{v});
+            }
+        },
+    }
 }

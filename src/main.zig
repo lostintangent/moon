@@ -56,6 +56,7 @@ pub fn main() !void {
 
     // Initialize shell state
     var state = State.init(allocator);
+    state.initCurrentScope(); // Fix up self-referential pointer after struct is in final location
     defer state.deinit();
 
     // On macOS, run path_helper to get the full system PATH for login/interactive shells

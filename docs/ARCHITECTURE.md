@@ -131,18 +131,57 @@ The runtime maintains shell state that persists across commands.
 | File | Purpose |
 |------|---------|
 | `state.zig` | Central state: variables, exports, functions, cwd |
+| `scope.zig` | Lexical scope chain for block-local variables |
 | `jobs.zig` | Job table: background/stopped process management |
 | `builtins.zig` | Builtin command registry and dispatch |
 | `builtins/*.zig` | Individual builtin implementations |
 
 **State contains:**
-- Shell variables (`set`) — list-valued, local to oshen
+- Scope chain for shell variables (block-local semantics)
 - Environment variables (`export`) — passed to child processes
 - Aliases — command name expansions
 - User-defined functions
 - Job table for background/stopped processes
 - Current working directory
 - Exit status
+
+#### Lexical Scoping
+
+Variables use a **scope chain** for proper lexical scoping. Each block (if, while, each, function) pushes a new scope, and variables follow these rules:
+
+1. **New variables** are created in the current (innermost) scope
+2. **Setting existing variables** updates them in the scope where they're defined
+3. **Reading variables** walks up the scope chain until found
+
+```
+┌─────────────────────────────────────┐
+│         Global Scope                │
+│   count = "0"                       │
+│   name = "Alice"                    │
+├─────────────────────────────────────┤
+│    ↑ parent                         │
+│  ┌──────────────────────────────┐   │
+│  │    If Branch Scope           │   │
+│  │  x = "local"  (new, local)   │   │
+│  │  count → updates global      │   │
+│  └──────────────────────────────┘   │
+└─────────────────────────────────────┘
+```
+
+Each scope owns an **arena allocator** for its variables. When a scope is popped (block exits), the arena is freed — O(1) cleanup regardless of how many variables were created.
+
+**Loop optimization**: For loops, the scope is pushed once and **reset** each iteration rather than push/pop per iteration. This reuses memory and avoids allocation overhead:
+
+```zig
+const loop_scope = state.pushScope();
+defer state.popScope();
+
+for (items) |item| {
+    loop_scope.reset();  // O(1) clear, retain memory
+    loop_scope.setLocalScalar("item", item);
+    // execute body...
+}
+```
 
 **Builtins:**
 

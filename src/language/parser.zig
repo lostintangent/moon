@@ -586,6 +586,13 @@ pub const Parser = struct {
         return .{ .@"return" = status };
     }
 
+    /// Parses an exit statement with optional status code.
+    fn parseExitStatement(self: *Parser) Statement {
+        _ = self.advance(); // consume 'exit'
+        const status = if (self.isWord()) self.captureWord() else null;
+        return .{ .@"exit" = status };
+    }
+
     /// Captures a single word token as trimmed source text.
     fn captureWord(self: *Parser) []const u8 {
         const start = self.pos;
@@ -667,6 +674,7 @@ pub const Parser = struct {
         }
         if (self.isKeyword("return")) return self.parseReturnStatement();
         if (self.isKeyword("defer")) return try self.parseDeferStatement();
+        if (self.isKeyword("exit")) return self.parseExitStatement();
 
         // Command statement
         const cmd_stmt = try self.parseCommandStatement() orelse return null;

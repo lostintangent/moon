@@ -231,6 +231,33 @@ test_case "Nested item shadowing" "each X Y; var o \$item; each 1 2; end; echo -
 test_case "Nested index shadowing" "each X Y; var oi \$index; each 1 2; end; echo -n \$index; end" "12"
 
 # ============================================================================
+# Block Scoping
+# ============================================================================
+print_header "Block Scoping (12 tests)"
+
+# New variables in blocks are local (not visible outside)
+test_case "If new var is local" "if true; var x local; end; echo [\$x]" "[]"
+test_case "Else new var is local" "if false; var a if; else; var b else; end; echo [\$a][\$b]" "[][]"
+test_case "While new var is local" "var i 0; while test \$i -lt 1; var x loop; increment i; end; echo [\$x]" "[]"
+test_case "Function new var is local" "fun f; var x local; end; f; echo [\$x]" "[]"
+
+# Setting existing variables updates them in their original scope
+test_case "If updates outer var" "var x outer; if true; var x inner; end; echo \$x" "inner"
+test_case "While updates outer var" "var x before; var i 0; while test \$i -lt 1; var x after; increment i; end; echo \$x" "after"
+test_case "Function updates outer var" "var x outer; fun f; var x inner; end; f; echo \$x" "inner"
+
+# Function argv is properly scoped (restored after call)
+test_case "Function argv is local" "var argv original; fun f; echo \$argv; end; f arg1 arg2; echo \$argv" "arg1 arg2\noriginal"
+
+# Cross-block scoping - new vars in nested blocks are local to that block
+test_case "Loop in if is scoped" "if true; each a b; var x \$item; end; echo [\$x]; end; echo done" "[]\ndone"
+test_case "If in loop is scoped" "each a; if true; var y inner; end; echo [\$y]; end" "[]"
+
+# Nested updates propagate to outermost definition
+test_case "Nested if updates outer" "var x 1; if true; var x 2; if true; var x 3; end; end; echo \$x" "3"
+test_case "Nested loop updates outer" "var x 0; each a; each b; var x \$item; end; end; echo \$x" "b"
+
+# ============================================================================
 # While Loops and Loop Control
 # ============================================================================
 print_header "While Loops (5 tests)"

@@ -86,7 +86,7 @@ pub const ExpandContext = struct {
         if (self.mock_glob) |*m| m.deinit();
     }
 
-    /// Get variable value from shell state or environment
+    /// Get variable value from shell state or environment (as a list)
     pub fn getVar(self: *ExpandContext, name: []const u8) ?[]const []const u8 {
         // Special variables
         if (std.mem.eql(u8, name, "?") or std.mem.eql(u8, name, "status")) {
@@ -94,9 +94,16 @@ pub const ExpandContext = struct {
             return null; // Let caller handle status formatting
         }
 
-        // Check shell vars first
+        // Check shell vars using scope chain
         if (self.state.getVarList(name)) |list| {
             return list;
+        }
+
+        // For scalars (returned by getVar but not getVarList), wrap in a slice
+        if (self.state.getVar(name)) |value| {
+            const slice = self.allocator.alloc([]const u8, 1) catch return null;
+            slice[0] = value;
+            return slice;
         }
 
         // Fall back to environment - wrap single value in slice
@@ -662,6 +669,7 @@ test "simple bare word" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     var state = State.init(arena.allocator());
+    state.initCurrentScope();
     defer state.deinit();
     var ctx = ExpandContext.init(arena.allocator(), &state);
     defer ctx.deinit();
@@ -677,6 +685,7 @@ test "variable expansion" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     var state = State.init(arena.allocator());
+    state.initCurrentScope();
     defer state.deinit();
     var ctx = ExpandContext.init(arena.allocator(), &state);
     defer ctx.deinit();
@@ -696,6 +705,7 @@ test "tilde expansion" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     var state = State.init(arena.allocator());
+    state.initCurrentScope();
     defer state.deinit();
     var ctx = ExpandContext.init(arena.allocator(), &state);
     defer ctx.deinit();
@@ -713,6 +723,7 @@ test "single quotes preserve literal" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     var state = State.init(arena.allocator());
+    state.initCurrentScope();
     defer state.deinit();
     var ctx = ExpandContext.init(arena.allocator(), &state);
     defer ctx.deinit();
@@ -731,6 +742,7 @@ test "double quoted escaped dollar is literal" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     var state = State.init(arena.allocator());
+    state.initCurrentScope();
     defer state.deinit();
     var ctx = ExpandContext.init(arena.allocator(), &state);
     defer ctx.deinit();
@@ -746,6 +758,7 @@ test "bare escaped dollar is literal" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     var state = State.init(arena.allocator());
+    state.initCurrentScope();
     defer state.deinit();
     var ctx = ExpandContext.init(arena.allocator(), &state);
     defer ctx.deinit();
@@ -761,6 +774,7 @@ test "cartesian product prefix" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     var state = State.init(arena.allocator());
+    state.initCurrentScope();
     defer state.deinit();
     var ctx = ExpandContext.init(arena.allocator(), &state);
     defer ctx.deinit();
@@ -780,6 +794,7 @@ test "cartesian two lists" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     var state = State.init(arena.allocator());
+    state.initCurrentScope();
     defer state.deinit();
     var ctx = ExpandContext.init(arena.allocator(), &state);
     defer ctx.deinit();
@@ -804,6 +819,7 @@ test "command substitution mock" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     var state = State.init(arena.allocator());
+    state.initCurrentScope();
     defer state.deinit();
     var ctx = ExpandContext.init(arena.allocator(), &state);
     defer ctx.deinit();
@@ -821,6 +837,7 @@ test "glob mock" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     var state = State.init(arena.allocator());
+    state.initCurrentScope();
     defer state.deinit();
     var ctx = ExpandContext.init(arena.allocator(), &state);
     defer ctx.deinit();
@@ -840,6 +857,7 @@ test "positional parameter $1" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     var state = State.init(arena.allocator());
+    state.initCurrentScope();
     defer state.deinit();
     var ctx = ExpandContext.init(arena.allocator(), &state);
     defer ctx.deinit();
@@ -858,6 +876,7 @@ test "positional parameter $2" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     var state = State.init(arena.allocator());
+    state.initCurrentScope();
     defer state.deinit();
     var ctx = ExpandContext.init(arena.allocator(), &state);
     defer ctx.deinit();
@@ -876,6 +895,7 @@ test "positional parameter $# count" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     var state = State.init(arena.allocator());
+    state.initCurrentScope();
     defer state.deinit();
     var ctx = ExpandContext.init(arena.allocator(), &state);
     defer ctx.deinit();
@@ -894,6 +914,7 @@ test "positional parameter $* all args" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     var state = State.init(arena.allocator());
+    state.initCurrentScope();
     defer state.deinit();
     var ctx = ExpandContext.init(arena.allocator(), &state);
     defer ctx.deinit();
@@ -913,6 +934,7 @@ test "positional parameter out of range" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     var state = State.init(arena.allocator());
+    state.initCurrentScope();
     defer state.deinit();
     var ctx = ExpandContext.init(arena.allocator(), &state);
     defer ctx.deinit();
@@ -935,6 +957,7 @@ test "array index: single positive index [1]" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     var state = State.init(arena.allocator());
+    state.initCurrentScope();
     defer state.deinit();
     var ctx = ExpandContext.init(arena.allocator(), &state);
     defer ctx.deinit();
@@ -953,6 +976,7 @@ test "array index: single positive index [2]" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     var state = State.init(arena.allocator());
+    state.initCurrentScope();
     defer state.deinit();
     var ctx = ExpandContext.init(arena.allocator(), &state);
     defer ctx.deinit();
@@ -971,6 +995,7 @@ test "array index: negative index [-1] = last" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     var state = State.init(arena.allocator());
+    state.initCurrentScope();
     defer state.deinit();
     var ctx = ExpandContext.init(arena.allocator(), &state);
     defer ctx.deinit();
@@ -989,6 +1014,7 @@ test "array index: negative index [-2] = second-to-last" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     var state = State.init(arena.allocator());
+    state.initCurrentScope();
     defer state.deinit();
     var ctx = ExpandContext.init(arena.allocator(), &state);
     defer ctx.deinit();
@@ -1007,6 +1033,7 @@ test "array index: out of bounds returns empty" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     var state = State.init(arena.allocator());
+    state.initCurrentScope();
     defer state.deinit();
     var ctx = ExpandContext.init(arena.allocator(), &state);
     defer ctx.deinit();
@@ -1025,6 +1052,7 @@ test "array index: range [1..2]" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     var state = State.init(arena.allocator());
+    state.initCurrentScope();
     defer state.deinit();
     var ctx = ExpandContext.init(arena.allocator(), &state);
     defer ctx.deinit();
@@ -1044,6 +1072,7 @@ test "array index: range [2..4]" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     var state = State.init(arena.allocator());
+    state.initCurrentScope();
     defer state.deinit();
     var ctx = ExpandContext.init(arena.allocator(), &state);
     defer ctx.deinit();
@@ -1064,6 +1093,7 @@ test "array index: range [2..] from index to end" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     var state = State.init(arena.allocator());
+    state.initCurrentScope();
     defer state.deinit();
     var ctx = ExpandContext.init(arena.allocator(), &state);
     defer ctx.deinit();
@@ -1084,6 +1114,7 @@ test "array index: range [..2] from start to index" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     var state = State.init(arena.allocator());
+    state.initCurrentScope();
     defer state.deinit();
     var ctx = ExpandContext.init(arena.allocator(), &state);
     defer ctx.deinit();
@@ -1103,6 +1134,7 @@ test "array index: negative range [-2..-1]" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     var state = State.init(arena.allocator());
+    state.initCurrentScope();
     defer state.deinit();
     var ctx = ExpandContext.init(arena.allocator(), &state);
     defer ctx.deinit();
@@ -1122,6 +1154,7 @@ test "array index: with brace expansion {$xs[2]}" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     var state = State.init(arena.allocator());
+    state.initCurrentScope();
     defer state.deinit();
     var ctx = ExpandContext.init(arena.allocator(), &state);
     defer ctx.deinit();
@@ -1140,6 +1173,7 @@ test "array index: argv[1]" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     var state = State.init(arena.allocator());
+    state.initCurrentScope();
     defer state.deinit();
     var ctx = ExpandContext.init(arena.allocator(), &state);
     defer ctx.deinit();
@@ -1158,6 +1192,7 @@ test "array index: zero index returns empty (1-based)" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     var state = State.init(arena.allocator());
+    state.initCurrentScope();
     defer state.deinit();
     var ctx = ExpandContext.init(arena.allocator(), &state);
     defer ctx.deinit();
@@ -1180,6 +1215,7 @@ test "brace expansion: simple comma list" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     var state = State.init(arena.allocator());
+    state.initCurrentScope();
     defer state.deinit();
     var ctx = ExpandContext.init(arena.allocator(), &state);
     defer ctx.deinit();
@@ -1197,6 +1233,7 @@ test "brace expansion: comma list with prefix" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     var state = State.init(arena.allocator());
+    state.initCurrentScope();
     defer state.deinit();
     var ctx = ExpandContext.init(arena.allocator(), &state);
     defer ctx.deinit();
@@ -1214,6 +1251,7 @@ test "brace expansion: comma list with suffix" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     var state = State.init(arena.allocator());
+    state.initCurrentScope();
     defer state.deinit();
     var ctx = ExpandContext.init(arena.allocator(), &state);
     defer ctx.deinit();
@@ -1231,6 +1269,7 @@ test "brace expansion: nested braces cartesian product" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     var state = State.init(arena.allocator());
+    state.initCurrentScope();
     defer state.deinit();
     var ctx = ExpandContext.init(arena.allocator(), &state);
     defer ctx.deinit();
@@ -1249,6 +1288,7 @@ test "brace expansion: variable inside braces" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     var state = State.init(arena.allocator());
+    state.initCurrentScope();
     defer state.deinit();
     var ctx = ExpandContext.init(arena.allocator(), &state);
     defer ctx.deinit();
@@ -1269,6 +1309,7 @@ test "brace expansion: glob pattern with suffix (mocked)" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     var state = State.init(arena.allocator());
+    state.initCurrentScope();
     defer state.deinit();
     var ctx = ExpandContext.init(arena.allocator(), &state);
     defer ctx.deinit();
@@ -1290,6 +1331,7 @@ test "brace expansion: multiple braces with prefix and suffix" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     var state = State.init(arena.allocator());
+    state.initCurrentScope();
     defer state.deinit();
     var ctx = ExpandContext.init(arena.allocator(), &state);
     defer ctx.deinit();
@@ -1308,6 +1350,7 @@ test "brace expansion: works alongside multi-part words" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     var state = State.init(arena.allocator());
+    state.initCurrentScope();
     defer state.deinit();
     var ctx = ExpandContext.init(arena.allocator(), &state);
     defer ctx.deinit();

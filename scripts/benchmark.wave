@@ -6,22 +6,24 @@ print -n --dim "Building Oshen..."
 zig build -Doptimize=ReleaseFast
 terminal clear
 
-# Alias oshen to point at the built binary (aliases shadow PATH executables)
-alias oshen ./zig-out/bin/oshen
+var OSHEN ./zig-out/bin/oshen
+var shells zsh fish elvish
 
-# Simple list of shell names - command derived from name
-var shells oshen zsh fish elvish
+# Benchmark oshen first (using local build)
+print -n --yellow "⏳ oshen"
+time -p $OSHEN $DIR/script.oshen => timing
+terminal clear
+print --green oshen
+print $timing --nl
 
-each shells
-    # Skip if shell not available
-    type $item > /dev/null 2>&1 || continue
+each shell in $shells
+    # Skip if shell isn't installed
+    type $shell > /dev/null 2>&1 || continue
 
-    print -n --yellow "⏳ $item"
-
-    time -p $item $DIR/script.$item => timing
-
-    # Clear progress line and show results
+    print -n --yellow "⏳ $shell"
+    time -p $shell $DIR/script.$shell => timing
     terminal clear
-    print --green $item
+    
+    print --green $shell
     print $timing --nl
 end

@@ -198,6 +198,8 @@ pub const Statement = union(enum) {
     /// Defer a command to run when the current function exits.
     /// Stores the pre-parsed command (always has background=false, capture=null).
     @"defer": CommandStatement,
+    /// Exit the shell with optional status code (raw source, expanded at runtime)
+    @"exit": ?[]const u8,
 };
 
 /// The top-level AST node representing a complete program.

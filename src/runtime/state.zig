@@ -2,12 +2,19 @@
 //!
 //! Central state management for the shell including variables, exports,
 //! functions, aliases, job control, and working directory.
+//!
+//! Variables use a scope chain for proper lexical scoping:
+//! - Variables defined in blocks (if/while/each/fun) are block-local
+//! - Setting an existing variable updates it in the scope where it was defined
+//! - Setting a new variable creates it in the current (innermost) scope
 
 const std = @import("std");
 const jobs = @import("jobs.zig");
 const env = @import("env.zig");
 const interpreter = @import("../interpreter/interpreter.zig");
 const ast = @import("../language/ast.zig");
+const Scope = @import("scope.zig").Scope;
+const ScopeValue = @import("scope.zig").Value;
 
 pub const JobTable = jobs.JobTable;
 pub const Job = jobs.Job;
@@ -49,8 +56,11 @@ pub const State = struct {
     /// Last command exit status
     status: u8 = 0,
 
-    /// Shell variables (list-valued)
-    vars: std.StringHashMap([]const []const u8),
+    /// Global scope for variables (always exists, never popped)
+    global_scope: Scope,
+
+    /// Current (innermost) scope for variable lookups and assignments
+    current_scope: *Scope,
 
     /// Exported environment variables
     exports: std.StringHashMap([]const u8),
@@ -102,26 +112,14 @@ pub const State = struct {
     deferred: std.ArrayListUnmanaged(ast.CommandStatement),
 
     // =========================================================================
-    // Memory Management Helpers
+    // Initialization
     // =========================================================================
-
-    /// Free a variable entry (key and all values in the list)
-    fn freeVarEntry(self: *State, entry: std.StringHashMap([]const []const u8).KV) void {
-        self.allocator.free(entry.key);
-        for (entry.value) |v| self.allocator.free(v);
-        self.allocator.free(entry.value);
-    }
-
-    /// Free an export, function, or alias entry (key-value pair)
-    pub fn freeStringEntry(self: *State, entry: std.StringHashMap([]const u8).KV) void {
-        self.allocator.free(entry.key);
-        self.allocator.free(entry.value);
-    }
 
     pub fn init(allocator: std.mem.Allocator) State {
         var state = State{
             .allocator = allocator,
-            .vars = std.StringHashMap([]const []const u8).init(allocator),
+            .global_scope = Scope.init(null, allocator),
+            .current_scope = undefined, // Set by caller via initCurrentScope()
             .exports = std.StringHashMap([]const u8).init(allocator),
             .functions = std.StringHashMap(Function).init(allocator),
             .aliases = std.StringHashMap([]const u8).init(allocator),
@@ -137,17 +135,23 @@ pub const State = struct {
         return state;
     }
 
+    /// Must be called after init() once the State is in its final location.
+    /// This fixes up the self-referential current_scope pointer.
+    pub fn initCurrentScope(self: *State) void {
+        self.current_scope = &self.global_scope;
+    }
+
     pub fn deinit(self: *State) void {
-        // Free all variable keys and values
-        var var_iter = self.vars.iterator();
-        while (var_iter.next()) |entry| {
-            self.allocator.free(entry.key_ptr.*);
-            for (entry.value_ptr.*) |v| {
-                self.allocator.free(v);
-            }
-            self.allocator.free(entry.value_ptr.*);
+        // Pop any remaining child scopes (shouldn't happen in normal operation)
+        while (self.current_scope != &self.global_scope) {
+            const old_scope = self.current_scope;
+            self.current_scope = old_scope.parent orelse &self.global_scope;
+            old_scope.deinit();
+            self.allocator.destroy(old_scope);
         }
-        self.vars.deinit();
+
+        // Free global scope's arena (but not the struct itself - it's embedded in State)
+        self.global_scope.deinit();
 
         // Free all export keys and values
         var exp_iter = self.exports.iterator();
@@ -188,58 +192,102 @@ pub const State = struct {
         self.deferred.deinit(self.allocator);
     }
 
-    /// Get a variable value (returns first element for string context)
+    // =========================================================================
+    // Scope Management
+    // =========================================================================
+
+    /// Push a new scope for a block (loop, function, if statement).
+    /// Returns a pointer to the new scope for direct manipulation.
+    pub fn pushScope(self: *State) !*Scope {
+        const new_scope = try self.allocator.create(Scope);
+        new_scope.* = Scope.init(self.current_scope, self.allocator);
+        self.current_scope = new_scope;
+        return new_scope;
+    }
+
+    /// Pop the current scope, restoring the parent as current.
+    /// Frees all memory allocated in the popped scope.
+    pub fn popScope(self: *State) void {
+        const old_scope = self.current_scope;
+
+        // Don't pop the global scope
+        if (old_scope == &self.global_scope) return;
+
+        // Restore parent as current
+        self.current_scope = old_scope.parent orelse &self.global_scope;
+
+        // Free the old scope
+        old_scope.deinit();
+        self.allocator.destroy(old_scope);
+    }
+
+    // =========================================================================
+    // Variable Operations
+    // =========================================================================
+
+    /// Find the scope where a variable should be set:
+    /// - If it exists anywhere in the chain, return that scope (for updates)
+    /// - Otherwise, return the current scope (for new variables)
+    fn targetScope(self: *State, name: []const u8) *Scope {
+        return self.current_scope.findScope(name) orelse self.current_scope;
+    }
+
+    /// Get a variable value as a string (first element for lists).
+    /// Walks the scope chain, then falls back to environment.
     pub fn getVar(self: *State, name: []const u8) ?[]const u8 {
-        // Check shell vars first
-        if (self.vars.get(name)) |list| {
-            if (list.len > 0) return list[0];
+        // Walk scope chain
+        if (self.current_scope.get(name)) |value| {
+            return value.asScalar();
         }
         // Fall back to environment
         return env.get(name);
     }
 
-    /// Get variable as list
+    /// Get a variable as a list.
+    /// Walks the scope chain. Does NOT fall back to environment (env vars are scalars).
     pub fn getVarList(self: *State, name: []const u8) ?[]const []const u8 {
-        return self.vars.get(name);
+        if (self.current_scope.get(name)) |value| {
+            return switch (value) {
+                .list => |l| l,
+                .scalar => null, // Scalars don't convert to lists for getVarList
+            };
+        }
+        return null;
     }
 
-    /// Set a variable (as single value)
+    /// Set a variable as a single value.
+    /// Updates in the scope where it's defined, or creates in current scope.
     pub fn setVar(self: *State, name: []const u8, value: []const u8) !void {
-        const list = try self.allocator.alloc([]const u8, 1);
-        list[0] = try self.allocator.dupe(u8, value);
-
-        // Free old entry if it exists
-        if (self.vars.fetchRemove(name)) |old| {
-            self.freeVarEntry(old);
-        }
-
-        const key = try self.allocator.dupe(u8, name);
-        try self.vars.put(key, list);
+        try self.targetScope(name).setLocalScalar(name, value);
     }
 
-    /// Set a variable (as list, for tests and list variables)
+    /// Set a variable as a list.
+    /// Updates in the scope where it's defined, or creates in current scope.
     pub fn setVarList(self: *State, name: []const u8, values: []const []const u8) !void {
-        // Free old entry if it exists
-        if (self.vars.fetchRemove(name)) |old| {
-            self.freeVarEntry(old);
-        }
-
-        // Copy all values
-        const list = try self.allocator.alloc([]const u8, values.len);
-        for (values, 0..) |v, i| {
-            list[i] = try self.allocator.dupe(u8, v);
-        }
-
-        const key = try self.allocator.dupe(u8, name);
-        try self.vars.put(key, list);
+        try self.targetScope(name).setLocalList(name, values);
     }
 
-    /// Remove a variable
+    /// Set a variable in the CURRENT scope only (for loop variables).
+    /// This always creates/updates in the innermost scope, enabling proper shadowing.
+    pub fn setLocalVar(self: *State, name: []const u8, value: []const u8) !void {
+        try self.current_scope.setLocalScalar(name, value);
+    }
+
+    /// Set a list variable in the CURRENT scope only.
+    pub fn setLocalVarList(self: *State, name: []const u8, values: []const []const u8) !void {
+        try self.current_scope.setLocalList(name, values);
+    }
+
+    /// Remove a variable from the scope where it's defined.
     pub fn unsetVar(self: *State, name: []const u8) void {
-        if (self.vars.fetchRemove(name)) |old| {
-            self.freeVarEntry(old);
+        if (self.current_scope.findScope(name)) |scope| {
+            _ = scope.removeLocal(name);
         }
     }
+
+    // =========================================================================
+    // Functions
+    // =========================================================================
 
     /// Get a function by name (returns mutable pointer for lazy caching)
     pub fn getFunction(self: *State, name: []const u8) ?*Function {
@@ -262,6 +310,10 @@ pub const State = struct {
         try self.functions.put(key, .{ .source = source });
     }
 
+    // =========================================================================
+    // Aliases
+    // =========================================================================
+
     /// Get an alias expansion by name
     pub fn getAlias(self: *State, name: []const u8) ?[]const u8 {
         return self.aliases.get(name);
@@ -270,7 +322,8 @@ pub const State = struct {
     /// Define or redefine an alias
     pub fn setAlias(self: *State, name: []const u8, expansion: []const u8) !void {
         if (self.aliases.fetchRemove(name)) |old| {
-            self.freeStringEntry(old);
+            self.allocator.free(old.key);
+            self.allocator.free(old.value);
         }
 
         const key = try self.allocator.dupe(u8, name);
@@ -284,9 +337,24 @@ pub const State = struct {
     /// Remove an alias
     pub fn unsetAlias(self: *State, name: []const u8) void {
         if (self.aliases.fetchRemove(name)) |old| {
-            self.freeStringEntry(old);
+            self.allocator.free(old.key);
+            self.allocator.free(old.value);
         }
     }
+
+    // =========================================================================
+    // Exports
+    // =========================================================================
+
+    /// Free an export entry (key-value pair) - used by builtins
+    pub fn freeStringEntry(self: *State, entry: std.StringHashMap([]const u8).KV) void {
+        self.allocator.free(entry.key);
+        self.allocator.free(entry.value);
+    }
+
+    // =========================================================================
+    // Status and CWD
+    // =========================================================================
 
     /// Set last exit status
     pub fn setStatus(self: *State, status: u8) void {
@@ -325,6 +393,10 @@ pub const State = struct {
         self.cwd = null;
     }
 
+    // =========================================================================
+    // Deferred Commands
+    // =========================================================================
+
     /// Push a deferred command onto the stack (executed LIFO on function exit).
     /// The CommandStatement's internal slices point into the cached AST, so no deep copy needed.
     pub fn pushDefer(self: *State, cmd_stmt: ast.CommandStatement) !void {
@@ -344,8 +416,153 @@ pub const State = struct {
 
 const testing = std.testing;
 
+test "variables: set and get" {
+    var state = State.init(testing.allocator);
+    state.initCurrentScope();
+    defer state.deinit();
+
+    try state.setVar("foo", "bar");
+    try testing.expectEqualStrings("bar", state.getVar("foo").?);
+}
+
+test "variables: set updates existing in outer scope" {
+    var state = State.init(testing.allocator);
+    state.initCurrentScope();
+    defer state.deinit();
+
+    // Set in global scope
+    try state.setVar("x", "outer");
+
+    // Push a new scope
+    _ = try state.pushScope();
+
+    // Set should update the outer scope's variable
+    try state.setVar("x", "modified");
+
+    // Check in inner scope
+    try testing.expectEqualStrings("modified", state.getVar("x").?);
+
+    // Pop scope and check global
+    state.popScope();
+    try testing.expectEqualStrings("modified", state.getVar("x").?);
+}
+
+test "variables: new var in inner scope is local" {
+    var state = State.init(testing.allocator);
+    state.initCurrentScope();
+    defer state.deinit();
+
+    // Push a new scope
+    _ = try state.pushScope();
+
+    // Set a NEW variable in inner scope
+    try state.setVar("local", "value");
+    try testing.expectEqualStrings("value", state.getVar("local").?);
+
+    // Pop scope - variable should be gone
+    state.popScope();
+    try testing.expect(state.getVar("local") == null);
+}
+
+test "variables: setLocalVar always creates in current scope" {
+    var state = State.init(testing.allocator);
+    state.initCurrentScope();
+    defer state.deinit();
+
+    // Set in global scope
+    try state.setVar("x", "outer");
+
+    // Push a new scope
+    _ = try state.pushScope();
+
+    // setLocalVar creates in current scope even if var exists in outer
+    try state.setLocalVar("x", "shadowed");
+    try testing.expectEqualStrings("shadowed", state.getVar("x").?);
+
+    // Pop - should see outer value again
+    state.popScope();
+    try testing.expectEqualStrings("outer", state.getVar("x").?);
+}
+
+test "variables: unset removes variable" {
+    var state = State.init(testing.allocator);
+    state.initCurrentScope();
+    defer state.deinit();
+
+    try state.setVar("foo", "bar");
+    try testing.expect(state.getVar("foo") != null);
+
+    state.unsetVar("foo");
+    try testing.expect(state.getVar("foo") == null);
+}
+
+test "variables: unset nonexistent is safe" {
+    var state = State.init(testing.allocator);
+    state.initCurrentScope();
+    defer state.deinit();
+
+    // Should not panic or error
+    state.unsetVar("nonexistent");
+}
+
+test "variables: list operations" {
+    var state = State.init(testing.allocator);
+    state.initCurrentScope();
+    defer state.deinit();
+
+    const values = [_][]const u8{ "a", "b", "c" };
+    try state.setVarList("xs", &values);
+
+    const list = state.getVarList("xs");
+    try testing.expect(list != null);
+    try testing.expectEqual(@as(usize, 3), list.?.len);
+    try testing.expectEqualStrings("a", list.?[0]);
+
+    // getVar returns first element
+    try testing.expectEqualStrings("a", state.getVar("xs").?);
+}
+
+test "scope: push and pop" {
+    var state = State.init(testing.allocator);
+    state.initCurrentScope();
+    defer state.deinit();
+
+    const global = state.current_scope;
+    try testing.expect(global == &state.global_scope);
+
+    const inner = try state.pushScope();
+    try testing.expect(state.current_scope == inner);
+    try testing.expect(inner.parent == global);
+
+    state.popScope();
+    try testing.expect(state.current_scope == global);
+}
+
+test "scope: reset for loop optimization" {
+    var state = State.init(testing.allocator);
+    state.initCurrentScope();
+    defer state.deinit();
+
+    const scope = try state.pushScope();
+
+    // Simulate loop iterations
+    for (0..3) |i| {
+        scope.reset(); // Clear vars, retain memory
+
+        var buf: [16]u8 = undefined;
+        const idx = std.fmt.bufPrint(&buf, "{d}", .{i}) catch unreachable;
+        try scope.setLocalScalar("i", idx);
+    }
+
+    // After reset, only the last value remains
+    try testing.expectEqualStrings("2", scope.getLocal("i").?.asScalar().?);
+
+    state.popScope();
+}
+
 test "functions: set and get" {
     var state = State.init(testing.allocator);
+    state.initCurrentScope();
     defer state.deinit();
 
     try state.setFunction("greet", "echo hello");
@@ -357,6 +574,7 @@ test "functions: set and get" {
 
 test "functions: get nonexistent returns null" {
     var state = State.init(testing.allocator);
+    state.initCurrentScope();
     defer state.deinit();
 
     try testing.expectEqual(@as(?*Function, null), state.getFunction("nonexistent"));
@@ -364,6 +582,7 @@ test "functions: get nonexistent returns null" {
 
 test "functions: redefinition replaces body" {
     var state = State.init(testing.allocator);
+    state.initCurrentScope();
     defer state.deinit();
 
     try state.setFunction("greet", "echo v1");
@@ -375,6 +594,7 @@ test "functions: redefinition replaces body" {
 
 test "functions: multiple functions" {
     var state = State.init(testing.allocator);
+    state.initCurrentScope();
     defer state.deinit();
 
     try state.setFunction("foo", "echo foo");
@@ -386,28 +606,9 @@ test "functions: multiple functions" {
     try testing.expectEqualStrings("echo baz", state.getFunction("baz").?.source);
 }
 
-test "variables: unset removes variable" {
-    var state = State.init(testing.allocator);
-    defer state.deinit();
-
-    try state.setVar("foo", "bar");
-    try testing.expect(state.getVar("foo") != null);
-
-    state.unsetVar("foo");
-    // After unset, should not be in vars hashmap
-    try testing.expect(!state.vars.contains("foo"));
-}
-
-test "variables: unset nonexistent is safe" {
-    var state = State.init(testing.allocator);
-    defer state.deinit();
-
-    // Should not panic or error
-    state.unsetVar("nonexistent");
-}
-
 test "aliases: set and get" {
     var state = State.init(testing.allocator);
+    state.initCurrentScope();
     defer state.deinit();
 
     try state.setAlias("ll", "ls -la");
@@ -419,6 +620,7 @@ test "aliases: set and get" {
 
 test "aliases: get nonexistent returns null" {
     var state = State.init(testing.allocator);
+    state.initCurrentScope();
     defer state.deinit();
 
     try testing.expectEqual(@as(?[]const u8, null), state.getAlias("nonexistent"));
@@ -426,6 +628,7 @@ test "aliases: get nonexistent returns null" {
 
 test "aliases: redefinition replaces expansion" {
     var state = State.init(testing.allocator);
+    state.initCurrentScope();
     defer state.deinit();
 
     try state.setAlias("g", "git");
@@ -437,6 +640,7 @@ test "aliases: redefinition replaces expansion" {
 
 test "aliases: unset removes alias" {
     var state = State.init(testing.allocator);
+    state.initCurrentScope();
     defer state.deinit();
 
     try state.setAlias("ll", "ls -la");
@@ -448,6 +652,7 @@ test "aliases: unset removes alias" {
 
 test "aliases: unset nonexistent is safe" {
     var state = State.init(testing.allocator);
+    state.initCurrentScope();
     defer state.deinit();
 
     // Should not panic or error

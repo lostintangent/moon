@@ -111,12 +111,31 @@ pub fn parseInput(allocator: std.mem.Allocator, input: []const u8) !ParsedInput 
 pub fn executeAst(allocator: std.mem.Allocator, state: *State, parsed: ParsedInput) !u8 {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
-    const arena_alloc = arena.allocator();
+    return executeAstWithArena(arena.allocator(), state, parsed);
+}
 
+/// Execute a pre-parsed AST using a provided allocator (for loop optimization).
+///
+/// This variant allows callers to manage their own arena and reuse it across
+/// multiple executions, avoiding the overhead of arena init/deinit per iteration.
+/// Used by while/each loops to dramatically reduce allocation overhead.
+///
+/// ## When to use
+/// - Loop bodies where the caller resets an arena between iterations
+/// - Any case where you want to control the allocator lifetime
+///
+/// ## Returns
+/// The exit status of the last executed statement (0-255).
+pub fn executeAstWithArena(arena_alloc: std.mem.Allocator, state: *State, parsed: ParsedInput) !u8 {
     var last_status: u8 = 0;
 
     for (parsed.ast.statements) |stmt| {
         last_status = try exec.executeStatement(arena_alloc, state, stmt, parsed.input);
+
+        // Exit signals bubble up to terminate the entire shell
+        if (state.should_exit) {
+            return state.exit_code;
+        }
 
         // Break/continue signals bubble up to the enclosing loop
         if (state.loop_break or state.loop_continue) {

@@ -410,6 +410,42 @@ greet Alice Bob Carol
 | `$var[n..]` | Elements from n to end |
 | `$var[..n]` | Elements from start to n |
 
+### Variable Scoping
+
+Variables in oshen use **block scoping** — new variables created inside blocks (if, while, each, functions) are local to that block:
+
+```sh
+# New variables in blocks are local
+if true
+    var x "only inside if"
+end
+echo $x                      # Empty - x doesn't exist here
+
+# But setting an EXISTING variable updates it
+var count 0
+if true
+    var count 1              # Updates outer count
+end
+echo $count                  # 1
+
+# Function arguments ($argv) are always local
+var argv "original"
+fun greet
+    echo "Hello $argv[1]"
+end
+greet Alice                  # Hello Alice
+echo $argv                   # original (restored)
+```
+
+This scoping model matches elvish and prevents variables from "leaking" out of blocks. Unlike zsh/bash/fish where variables in if-blocks are visible outside, oshen keeps block-local variables contained.
+
+| Block Type | New vars visible outside? | Updates outer vars? |
+|------------|--------------------------|---------------------|
+| `if`/`else` | No | Yes |
+| `while` | No | Yes |
+| `each`/`for` | No | Yes |
+| `fun` | No | Yes |
+
 ### Special Expansions
 
 ```sh

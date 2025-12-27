@@ -54,6 +54,7 @@ pub const TestContext = struct {
     /// Must be called after init() - sets up state and ctx with proper pointers.
     pub fn setup(self: *TestContext) void {
         self.state = State.init(self.arena.allocator());
+        self.state.initCurrentScope();
         self.ctx = expand.ExpandContext.init(self.arena.allocator(), &self.state);
     }
 
