@@ -1,11 +1,12 @@
 # 🌊 Oshen
 
-A modern shell with a clean syntax and a great developer experience out-of-the-box:
+A modern shell with a great developer experience out-of-the-box:
 
-- **Zero-setup REPL** — Syntax highlighting, ghost text, completions, and a beautiful default prompt.
-- **Clean syntax** — Familiar control flow with script-friendly ergonomics, plus [`defer`](#defer) for automatic cleanup.
+- **Zero-setup REPL** — Syntax highlighting, ghost text, tab completions, and a git-aware default prompt.
+- **Clean syntax** — Familiar control flow with [block-scoped variables](#variable-scoping), plus [`defer`](#defer) for automatic cleanup.
 - **Lists by default** — Variables, [globs](#glob-patterns), and [brace expansion](#brace-expansion) all produce lists, which can be enumerated, indexed, or sliced.
 - **Modern builtins** — [Colored output](#colored-output-with-print), [output capture](#output-capture), [arithmetic (`calc`/`=`)](#calc-expressions), [`increment`](#increment), [`path_prepend`](#path_prepend), and more!
+- **Fast** — Carefully optimized to make real-world scripts and interactive use snappy.
 
 ---
 

@@ -177,6 +177,7 @@ fn consumeLoopSignal(state: *State) ?LoopSignal {
 
 /// Execute an if statement by evaluating condition branches and running appropriate branch.
 /// Each branch body gets its own scope - variables created inside are block-local.
+/// Uses scope pooling to avoid allocation overhead in hot loops.
 fn executeIfStatement(allocator: std.mem.Allocator, state: *State, if_stmt: expansion_types.ast.IfStatement) u8 {
     // Try each branch in order (first is "if", rest are "else if")
     for (if_stmt.branches) |branch| {
@@ -191,12 +192,12 @@ fn executeIfStatement(allocator: std.mem.Allocator, state: *State, if_stmt: expa
 
         // Exit status 0 means true (success) - execute this branch's body
         if (cond_status == 0) {
-            // Push a scope for this branch - variables created inside are block-local
-            _ = state.pushScope() catch {
+            // Acquire a scope from pool (or allocate if pool empty)
+            _ = state.acquireScope() catch {
                 io.printError("if: out of memory\n", .{});
                 return 1;
             };
-            defer state.popScope();
+            defer state.releaseScope(); // Returns scope to pool for reuse
 
             const body_status = executeBody(allocator, state, branch.body, "if: body error");
             // fn_return propagates automatically since we return the status
@@ -206,12 +207,12 @@ fn executeIfStatement(allocator: std.mem.Allocator, state: *State, if_stmt: expa
 
     // No branch condition was true - try else body if present
     if (if_stmt.else_body) |else_body| {
-        // Push a scope for else branch
-        _ = state.pushScope() catch {
+        // Acquire a scope from pool for else branch
+        _ = state.acquireScope() catch {
             io.printError("if: out of memory\n", .{});
             return 1;
         };
-        defer state.popScope();
+        defer state.releaseScope();
 
         return executeBody(allocator, state, else_body, "if: else error");
     }
@@ -425,7 +426,7 @@ fn executeCmdStatement(allocator: std.mem.Allocator, state: *State, stmt: expans
 
     // Handle capture: redirect stdout to a pipe and read the output
     if (stmt.capture) |capture| {
-        return executeCmdWithCapture(allocator, state, stmt, capture);
+        return executeCommandWithCapture(allocator, state, stmt, capture);
     }
 
     // Foreground execution - delegate to simple command executor
@@ -458,28 +459,34 @@ fn expandPipelineInChild(allocator: std.mem.Allocator, state: *State, ast_pipeli
     };
 }
 
-/// Execute a command statement with output capture (=> or =>@)
-fn executeCmdWithCapture(allocator: std.mem.Allocator, state: *State, stmt: expansion_types.ast.CommandStatement, capture: expansion_types.Capture) !u8 {
+/// Execute a command statement with output capture (=> or =>@).
+///
+/// For simple builtins, captures output in-process (~100x faster).
+/// For external commands or pipelines, forks a child process.
+fn executeCommandWithCapture(allocator: std.mem.Allocator, state: *State, command: expansion_types.ast.CommandStatement, capture: expansion_types.Capture) !u8 {
+    // Fast path: single builtin without redirects
+    if (capture_mod.tryExpandSimpleBuiltin(allocator, state, command)) |expanded| {
+        defer expanded.deinit(allocator);
+        const result = try capture_mod.captureBuiltin(allocator, state, expanded.cmd);
+        defer allocator.free(result.output);
+        try capture_mod.storeCapture(allocator, state, result.output, capture.variable, capture.mode == .lines);
+        state.setStatus(result.status);
+        return result.status;
+    }
+
+    // Slow path: fork for external commands, pipelines, or complex cases
     const result = switch (try capture_mod.forkWithPipe()) {
         .child => {
-            // In child: execute the command chains
             var last_status: u8 = 0;
-            for (stmt.chains) |chain| {
-                // Expand pipeline (exits on error)
-                const expanded_cmds = expandPipelineInChild(allocator, state, chain.pipeline);
-
-                // For single commands, try builtin first, then external
-                if (expanded_cmds.len == 1) {
-                    const cmd = expanded_cmds[0];
-                    if (cmd.argv.len > 0) {
-                        if (builtins.tryRun(state, cmd)) |status| {
-                            last_status = status;
-                            continue;
-                        }
+            for (command.chains) |chain| {
+                const expanded = expandPipelineInChild(allocator, state, chain.pipeline);
+                if (expanded.len == 1 and expanded[0].argv.len > 0) {
+                    if (builtins.tryRun(state, expanded[0])) |s| {
+                        last_status = s;
+                        continue;
                     }
                 }
-                // External command or pipeline
-                last_status = pipeline.executePipelineInChild(allocator, state, expanded_cmds, &tryRunFunction) catch 1;
+                last_status = pipeline.executePipelineInChild(allocator, state, expanded, &tryRunFunction) catch 1;
             }
             std.posix.exit(last_status);
         },
@@ -487,26 +494,7 @@ fn executeCmdWithCapture(allocator: std.mem.Allocator, state: *State, stmt: expa
     };
     defer allocator.free(result.output);
 
-    switch (capture.mode) {
-        .string => {
-            // Store as single string
-            try state.setVar(capture.variable, result.output);
-        },
-        .lines => {
-            // Store as list of lines
-            var lines: std.ArrayListUnmanaged([]const u8) = .empty;
-            defer lines.deinit(allocator);
-
-            var iter = std.mem.splitScalar(u8, result.output, '\n');
-            while (iter.next()) |line| {
-                const line_copy = try allocator.dupe(u8, line);
-                try lines.append(allocator, line_copy);
-            }
-
-            try state.setVarList(capture.variable, lines.items);
-        },
-    }
-
+    try capture_mod.storeCapture(allocator, state, result.output, capture.variable, capture.mode == .lines);
     state.setStatus(result.status);
     return result.status;
 }
@@ -575,17 +563,18 @@ fn runFunctionWithArgs(allocator: std.mem.Allocator, state: *State, cmd: Expande
     // Remember how many deferred commands exist before this function
     const defer_count_before = state.deferred.items.len;
 
-    // Push a function scope - $argv and any local variables are scoped here
-    const fn_scope = state.pushScope() catch {
+    // Acquire a function scope from pool (or allocate if pool empty)
+    // This is much faster than pushScope() in hot loops
+    const fn_scope = state.acquireScope() catch {
         io.printError("function {s}: out of memory\n", .{name});
         return 1;
     };
 
-    // Guaranteed cleanup: pop scope and run defers on all exit paths
-    defer state.popScope();
+    // Guaranteed cleanup: release scope to pool and run defers on all exit paths
+    defer state.releaseScope();
     defer runDeferredCommandsFromIndex(allocator, state, defer_count_before);
 
-    // Set $argv in the function scope (automatically restored when scope pops)
+    // Set $argv in the function scope (automatically restored when scope is released)
     fn_scope.setLocalList("argv", if (cmd.argv.len > 1) cmd.argv[1..] else &.{}) catch {
         io.printError("function {s}: out of memory\n", .{name});
         return 1;

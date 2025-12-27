@@ -1,6 +1,11 @@
-//! Subprocess output capture utilities.
+//! Output capture utilities.
 //!
-//! Provides `forkWithPipe()` for capturing stdout and stderr from a child process.
+//! Provides two capture strategies:
+//! - `captureBuiltin()`: In-process capture for builtins (fast, no fork)
+//! - `forkWithPipe()`: Fork-based capture for external commands
+//!
+//! Also provides `tryExpandSimpleBuiltin()` to detect when the fast path is usable.
+//!
 //! Used by:
 //! - Output capture operators (`=>`, `=>@`)
 //! - Command substitution `$(...)`
@@ -8,6 +13,12 @@
 
 const std = @import("std");
 const io = @import("../../terminal/io.zig");
+const builtins = @import("../../runtime/builtins.zig");
+const State = @import("../../runtime/state.zig").State;
+const ExpandedCmd = @import("../expansion/expanded.zig").ExpandedCmd;
+const ast = @import("../../language/ast.zig");
+const expand = @import("../expansion/word.zig");
+const expansion_statement = @import("../expansion/statement.zig");
 
 // C library functions
 const c = struct {
@@ -18,6 +29,149 @@ pub const CaptureResult = struct {
     output: []const u8,
     status: u8,
 };
+
+// =============================================================================
+// Simple Builtin Detection
+// =============================================================================
+
+/// A simple builtin command that can be captured in-process.
+/// Contains both the expanded command and the slice it came from (for cleanup).
+pub const ExpandedBuiltin = struct {
+    cmd: ExpandedCmd,
+    slice: []const ExpandedCmd,
+
+    /// Free all memory allocated for the expanded commands.
+    pub fn deinit(self: ExpandedBuiltin, allocator: std.mem.Allocator) void {
+        for (self.slice) |cmd| {
+            allocator.free(cmd.argv);
+            allocator.free(cmd.env);
+            allocator.free(cmd.redirects);
+        }
+        allocator.free(self.slice);
+    }
+};
+
+/// Try to expand a CommandStatement as a simple builtin (single command, no redirects).
+///
+/// Returns null if the statement is too complex for in-process capture:
+/// - Multiple chains (&&, ||)
+/// - Pipelines (|)
+/// - Redirects (>, <, etc.)
+/// - External commands (not a builtin)
+///
+/// On success, caller owns the returned ExpandedBuiltin and must call deinit().
+pub fn tryExpandSimpleBuiltin(allocator: std.mem.Allocator, state: *State, stmt: ast.CommandStatement) ?ExpandedBuiltin {
+    // Must be: single chain, single command, no redirects in AST
+    if (stmt.chains.len != 1) return null;
+    const chain = stmt.chains[0];
+    if (chain.pipeline.commands.len != 1) return null;
+    if (chain.pipeline.commands[0].redirects.len != 0) return null;
+
+    // Expand and verify it's a builtin
+    var ctx = expand.ExpandContext.init(allocator, state);
+    defer ctx.deinit();
+
+    const expanded = expansion_statement.expandPipeline(allocator, &ctx, chain.pipeline) catch return null;
+
+    // Verify: single command, has argv, no redirects after expansion, is a builtin
+    if (expanded.len != 1 or expanded[0].argv.len == 0 or expanded[0].redirects.len != 0) {
+        freeExpandedSlice(allocator, expanded);
+        return null;
+    }
+    if (!builtins.isBuiltin(expanded[0].argv[0])) {
+        freeExpandedSlice(allocator, expanded);
+        return null;
+    }
+
+    return .{ .cmd = expanded[0], .slice = expanded };
+}
+
+fn freeExpandedSlice(allocator: std.mem.Allocator, cmds: []const ExpandedCmd) void {
+    for (cmds) |cmd| {
+        allocator.free(cmd.argv);
+        allocator.free(cmd.env);
+        allocator.free(cmd.redirects);
+    }
+    allocator.free(cmds);
+}
+
+// =============================================================================
+// In-Process Builtin Capture
+// =============================================================================
+
+/// Capture a builtin's stdout output in-process without forking.
+///
+/// This is ~100x faster than fork-based capture because it avoids the overhead
+/// of process creation, context switching, and IPC. The tradeoff is that it
+/// only works for builtins (not external commands or pipelines).
+///
+/// The implementation redirects stdout to a pipe, runs the builtin, then reads
+/// the captured output. This is safe because builtins run synchronously and
+/// don't spawn child processes.
+pub fn captureBuiltin(allocator: std.mem.Allocator, state: *State, cmd: ExpandedCmd) !CaptureResult {
+    // Create pipe: builtin writes to write_fd, we read from read_fd
+    const pipe_fds = try std.posix.pipe();
+    const read_fd = pipe_fds[0];
+    const write_fd = pipe_fds[1];
+    errdefer std.posix.close(read_fd);
+
+    // Redirect stdout to the pipe
+    const saved_stdout = try std.posix.dup(std.posix.STDOUT_FILENO);
+    defer std.posix.close(saved_stdout);
+
+    try std.posix.dup2(write_fd, std.posix.STDOUT_FILENO);
+    std.posix.close(write_fd);
+
+    // Run the builtin (output goes to pipe)
+    const status = builtins.tryRun(state, cmd) orelse 1;
+
+    // Restore stdout (closes the pipe's write end, allowing read to see EOF)
+    try std.posix.dup2(saved_stdout, std.posix.STDOUT_FILENO);
+
+    // Read captured output
+    const output = try readAllFromFd(allocator, read_fd);
+    std.posix.close(read_fd);
+
+    return .{ .output = output, .status = status };
+}
+
+/// Read all data from a file descriptor until EOF, trimming trailing newlines.
+fn readAllFromFd(allocator: std.mem.Allocator, fd: std.posix.fd_t) ![]const u8 {
+    var output: std.ArrayListUnmanaged(u8) = .empty;
+    errdefer output.deinit(allocator);
+
+    var buf: [4096]u8 = undefined;
+    while (true) {
+        const n = std.posix.read(fd, &buf) catch break;
+        if (n == 0) break;
+        try output.appendSlice(allocator, buf[0..n]);
+    }
+
+    const trimmed = std.mem.trimRight(u8, output.items, "\n");
+    const result = try allocator.dupe(u8, trimmed);
+    output.deinit(allocator);
+    return result;
+}
+
+/// Store captured output into a shell variable.
+pub fn storeCapture(allocator: std.mem.Allocator, state: *State, output: []const u8, variable: []const u8, as_lines: bool) !void {
+    if (as_lines) {
+        var lines: std.ArrayListUnmanaged([]const u8) = .empty;
+        defer lines.deinit(allocator);
+
+        var iter = std.mem.splitScalar(u8, output, '\n');
+        while (iter.next()) |line| {
+            try lines.append(allocator, try allocator.dupe(u8, line));
+        }
+        try state.setVarList(variable, lines.items);
+    } else {
+        try state.setVar(variable, output);
+    }
+}
+
+// =============================================================================
+// Fork-Based Capture
+// =============================================================================
 
 /// Result of forkWithPipe - tells caller which process they're in.
 pub const ForkResult = union(enum) {

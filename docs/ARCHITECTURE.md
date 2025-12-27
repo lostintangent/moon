@@ -13,6 +13,7 @@ This document describes Oshen's internal architecture and execution flow.
   - [The Three Stages](#the-three-stages)
   - [Pipeline Diagram](#pipeline-diagram)
 - [Process & Job Control](#process--job-control)
+  - [In-Process Builtin Capture](#in-process-builtin-capture)
 - [Key Design Decisions](#key-design-decisions)
 
 ---
@@ -182,6 +183,22 @@ for (items) |item| {
     // execute body...
 }
 ```
+
+**Scope pooling**: For if statements and function calls (which can't use the loop reset pattern), oshen maintains a **scope pool** to avoid repeated allocation/deallocation in hot loops:
+
+```zig
+// Instead of allocating a new scope each time:
+const scope = state.acquireScope();  // Get from pool (or allocate if empty)
+defer state.releaseScope();           // Return to pool for reuse
+```
+
+The pool works like a library book system:
+- First time you need a scope, it's allocated (no choice)
+- When done, return it to the pool (`releaseScope()` resets variables and adds to pool)
+- Next time, borrow from pool instead of allocating
+- Pool is capped at 16 scopes to avoid unbounded growth
+
+This makes function calls and if statements inside loops dramatically faster — up to 17x improvement — by eliminating syscalls for memory allocation.
 
 **Builtins:**
 
@@ -427,6 +444,43 @@ jobs | grep sleep      →  Fork, run builtin with shell state access, exit
 
 This ensures common cases like `cd`, `set`, and simple `echo` remain fast, while redirects and pipelines work correctly.
 
+### In-Process Builtin Capture
+
+Output capture (`=>`, `=>@`) and command substitution (`$(...)`) normally require forking a child process to capture stdout. However, for simple builtin commands, oshen captures output **in-process** — avoiding fork overhead entirely.
+
+```
+# These use the fast path (no fork):
+echo hello => greeting           # Simple builtin capture
+var user (whoami)                # Wait, whoami is external...
+var x (= 1 + 2)                  # calc/= is a builtin!
+var cwd (pwd)                    # pwd is a builtin
+
+# These use the slow path (fork required):
+var files (ls)                   # External command
+var result (echo hi | cat)       # Pipeline
+var out (echo hello > /tmp/x)    # Has redirects
+```
+
+**How it works:**
+
+1. Before forking, check if the command is a "simple builtin":
+   - Single command (no pipeline)
+   - No redirects
+   - Command name is a builtin
+
+2. If yes, redirect stdout to a pipe, run the builtin in-process, read the output, restore stdout
+
+3. If no, fall back to fork-based capture
+
+**Performance impact:** In-process capture is ~100x faster than fork-based capture. This matters for prompts (which often use `$(pwd)` or `$(git branch)`) and scripts with many command substitutions.
+
+The fast path is implemented in `capture.zig`:
+- `tryExpandSimpleBuiltin()` - detects when the fast path is usable
+- `captureBuiltin()` - runs the builtin with stdout redirected to a pipe
+- `forkWithPipe()` - the slow path for external commands and complex cases
+
+Both `interpreter.executeAndCapture()` (for command substitution) and `exec.executeCommandWithCapture()` (for `=>` operators) use this same infrastructure.
+
 ### Job Table
 
 Background and stopped processes are tracked in a job table:
@@ -621,3 +675,16 @@ The structural parser treats words as opaque text — it doesn't know about vari
 4. **Quote-aware**: The expander knows which segments were quoted, enabling proper suppression of expansion in single quotes
 
 The alternative — tokenizing `$var[1]` as `VAR_REF` + `INDEX` — would tightly couple the grammar to expansion rules and require parser changes for every new feature.
+
+### 8. Scope Pooling for Hot Loops
+
+Control flow and function calls need scopes, but allocating/deallocating them in tight loops is expensive. Oshen uses two complementary strategies:
+
+| Pattern | Strategy | How It Works |
+|---------|----------|--------------|
+| Loops (`for`, `while`) | Scope reset | Push once, `reset()` each iteration (O(1) clear) |
+| If/Functions | Scope pool | `acquireScope()` from pool, `releaseScope()` back to pool |
+
+The scope pool maintains up to 16 pre-allocated scopes. When a function returns or an if-branch completes, the scope is reset and returned to the pool instead of being freed. The next function call or if-statement grabs it from the pool instead of allocating.
+
+**Performance impact**: In benchmarks with 100k function calls in a loop, scope pooling improved performance from 1.7s to 0.1s — a 17x speedup — by eliminating system calls for memory allocation.

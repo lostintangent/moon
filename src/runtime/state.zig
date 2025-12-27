@@ -20,6 +20,9 @@ pub const JobTable = jobs.JobTable;
 pub const Job = jobs.Job;
 pub const JobStatus = jobs.JobStatus;
 
+/// Maximum number of scopes to keep in the pool (see releaseScope).
+const max_pooled_scopes = 16;
+
 /// A user-defined function with lazy-parsed AST caching.
 pub const Function = struct {
     /// The raw source text of the function body (owned by State's allocator)
@@ -111,6 +114,11 @@ pub const State = struct {
     /// CommandStatements contain slices that point into the cached function AST.
     deferred: std.ArrayListUnmanaged(ast.CommandStatement),
 
+    /// Pool of reusable scopes to avoid allocation overhead in hot loops.
+    /// When a scope is released, it's reset and added here for reuse.
+    /// This dramatically improves performance for if statements and function calls in loops.
+    scope_pool: std.ArrayListUnmanaged(*Scope),
+
     // =========================================================================
     // Initialization
     // =========================================================================
@@ -125,6 +133,7 @@ pub const State = struct {
             .aliases = std.StringHashMap([]const u8).init(allocator),
             .jobs = JobTable.init(allocator),
             .deferred = .empty,
+            .scope_pool = .empty,
         };
 
         // Initialize HOME from environment
@@ -190,6 +199,13 @@ pub const State = struct {
 
         // Deferred commands are pointers into cached AST, no need to free contents
         self.deferred.deinit(self.allocator);
+
+        // Free pooled scopes
+        for (self.scope_pool.items) |scope| {
+            scope.deinit();
+            self.allocator.destroy(scope);
+        }
+        self.scope_pool.deinit(self.allocator);
     }
 
     // =========================================================================
@@ -219,6 +235,51 @@ pub const State = struct {
         // Free the old scope
         old_scope.deinit();
         self.allocator.destroy(old_scope);
+    }
+
+    /// Acquire a scope from the pool or allocate a new one.
+    /// This is faster than pushScope() in hot loops because it reuses memory.
+    /// The returned scope has its parent set to the current scope and becomes current.
+    pub fn acquireScope(self: *State) !*Scope {
+        if (self.scope_pool.items.len > 0) {
+            // Reuse pooled scope - it's already been reset
+            const scope = self.scope_pool.items[self.scope_pool.items.len - 1];
+            self.scope_pool.items.len -= 1;
+            scope.parent = self.current_scope;
+            self.current_scope = scope;
+            return scope;
+        }
+        // No pooled scope available, allocate a new one
+        return self.pushScope();
+    }
+
+    /// Release a scope back to the pool for reuse.
+    /// This is faster than popScope() because it avoids deallocation.
+    /// The scope is reset (variables cleared) and added to the pool.
+    pub fn releaseScope(self: *State) void {
+        const old_scope = self.current_scope;
+
+        // Don't release the global scope
+        if (old_scope == &self.global_scope) return;
+
+        // Restore parent as current
+        self.current_scope = old_scope.parent orelse &self.global_scope;
+
+        // Reset the scope for reuse (clears vars, retains memory)
+        old_scope.reset();
+
+        // Add to pool if there's room (limit pool size to avoid unbounded growth)
+        if (self.scope_pool.items.len < max_pooled_scopes) {
+            self.scope_pool.append(self.allocator, old_scope) catch {
+                // Pool append failed, just free the scope
+                old_scope.deinit();
+                self.allocator.destroy(old_scope);
+            };
+        } else {
+            // Pool is full, free the scope
+            old_scope.deinit();
+            self.allocator.destroy(old_scope);
+        }
     }
 
     // =========================================================================
@@ -657,4 +718,152 @@ test "aliases: unset nonexistent is safe" {
 
     // Should not panic or error
     state.unsetAlias("nonexistent");
+}
+
+// =============================================================================
+// Scope Pool Tests
+// =============================================================================
+
+test "scope pool: acquire returns new scope when pool empty" {
+    var state = State.init(testing.allocator);
+    state.initCurrentScope();
+    defer state.deinit();
+
+    // Pool starts empty
+    try testing.expectEqual(@as(usize, 0), state.scope_pool.items.len);
+
+    // Acquire should allocate a new scope
+    const scope = try state.acquireScope();
+    try testing.expect(scope != &state.global_scope);
+    try testing.expect(state.current_scope == scope);
+
+    // Release it back to pool
+    state.releaseScope();
+    try testing.expectEqual(@as(usize, 1), state.scope_pool.items.len);
+}
+
+test "scope pool: acquire reuses pooled scope" {
+    var state = State.init(testing.allocator);
+    state.initCurrentScope();
+    defer state.deinit();
+
+    // Acquire and release to populate pool
+    const scope1 = try state.acquireScope();
+    const scope1_ptr = scope1;
+    state.releaseScope();
+
+    // Pool should have one scope
+    try testing.expectEqual(@as(usize, 1), state.scope_pool.items.len);
+
+    // Acquire again - should get the same scope back
+    const scope2 = try state.acquireScope();
+    try testing.expect(scope2 == scope1_ptr);
+
+    // Pool should be empty now
+    try testing.expectEqual(@as(usize, 0), state.scope_pool.items.len);
+
+    state.releaseScope();
+}
+
+test "scope pool: released scope has variables cleared" {
+    var state = State.init(testing.allocator);
+    state.initCurrentScope();
+    defer state.deinit();
+
+    // Acquire scope and set a variable
+    const scope1 = try state.acquireScope();
+    try scope1.setLocalScalar("foo", "bar");
+    try testing.expect(scope1.getLocal("foo") != null);
+
+    // Release - variables should be cleared
+    state.releaseScope();
+
+    // Acquire again - should be the same scope but empty
+    const scope2 = try state.acquireScope();
+    try testing.expect(scope2.getLocal("foo") == null);
+
+    state.releaseScope();
+}
+
+test "scope pool: parent chain is correct after reuse" {
+    var state = State.init(testing.allocator);
+    state.initCurrentScope();
+    defer state.deinit();
+
+    // Set a variable in global scope
+    try state.setVar("global_var", "global_value");
+
+    // Acquire, release, acquire again
+    _ = try state.acquireScope();
+    state.releaseScope();
+
+    const scope = try state.acquireScope();
+
+    // Reused scope should have global as parent
+    try testing.expect(scope.parent == &state.global_scope);
+
+    // Should be able to see global variable through parent chain
+    try testing.expect(scope.get("global_var") != null);
+    try testing.expectEqualStrings("global_value", scope.get("global_var").?.asScalar().?);
+
+    state.releaseScope();
+}
+
+test "scope pool: size is limited" {
+    var state = State.init(testing.allocator);
+    state.initCurrentScope();
+    defer state.deinit();
+
+    // Acquire and release many scopes (more than max pool size of 16)
+    for (0..20) |_| {
+        _ = try state.acquireScope();
+        state.releaseScope();
+    }
+
+    // Pool should be capped at max size
+    try testing.expect(state.scope_pool.items.len <= max_pooled_scopes);
+}
+
+test "scope pool: nested acquire/release works correctly" {
+    var state = State.init(testing.allocator);
+    state.initCurrentScope();
+    defer state.deinit();
+
+    // Simulate nested if statements or function calls
+    const outer = try state.acquireScope();
+    try outer.setLocalScalar("outer_var", "outer");
+
+    const inner = try state.acquireScope();
+    try inner.setLocalScalar("inner_var", "inner");
+
+    // Inner should see outer's variable through parent chain
+    try testing.expect(inner.get("outer_var") != null);
+    try testing.expect(inner.get("inner_var") != null);
+
+    // Release inner
+    state.releaseScope();
+    try testing.expect(state.current_scope == outer);
+
+    // Outer should still have its variable
+    try testing.expect(outer.getLocal("outer_var") != null);
+    // But not inner's variable
+    try testing.expect(outer.get("inner_var") == null);
+
+    // Release outer
+    state.releaseScope();
+    try testing.expect(state.current_scope == &state.global_scope);
+
+    // Pool should have 2 scopes now
+    try testing.expectEqual(@as(usize, 2), state.scope_pool.items.len);
+}
+
+test "scope pool: releaseScope on global scope is safe" {
+    var state = State.init(testing.allocator);
+    state.initCurrentScope();
+    defer state.deinit();
+
+    // Should not crash when trying to release global scope
+    state.releaseScope();
+    try testing.expect(state.current_scope == &state.global_scope);
+    try testing.expectEqual(@as(usize, 0), state.scope_pool.items.len);
 }
